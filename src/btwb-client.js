@@ -828,6 +828,480 @@ export async function getMovementHistory({ memberId, movementId, movementSlug, d
   return res.json();
 }
 
+// Posts a workout *definition* (a prescription, not a result) to BTWB's
+// workout builder - the same request its "Build Workout" wizard submits when
+// you press "Next: Confirm & Save". Captured by filling the wizard in and
+// reading the POST it makes.
+//
+// The endpoint is find-OR-create: an identical prescription resolves to the
+// workout already in BTWB's library instead of creating a duplicate (building
+// "Bench Press, 3 sets of 3" answers "Workout Found: Bench Press : 3-3-3
+// (id: 9385)"). That makes it safe to call repeatedly - it won't litter the
+// library - and means the id you get back is usually one everyone already
+// shares, so results are comparable across the site.
+//
+// Body is a single `definition` field holding JSON; the CSRF token rides in
+// the X-CSRF-Token header, not the body, the same way postPrescribedSession
+// sends it.
+async function saveWorkoutDefinition({ toolName, prescription, contents, name, description }) {
+  const csrfToken = await getCsrfToken();
+  const definition = { type: "workout", prescription, contents };
+
+  const res = await fetch(`${BASE_URL}/workouts/builder/save`, {
+    method: "POST",
+    headers: {
+      Cookie: cachedCookie,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "X-CSRF-Token": csrfToken,
+    },
+    body: new URLSearchParams({ definition: JSON.stringify(definition) }),
+  });
+
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`BTWB ${toolName} failed: HTTP ${res.status}. ${text.slice(0, 300)}`);
+  }
+
+  // Match found - BTWB resolved the prescription to a workout already in its
+  // library and there's nothing to create.
+  const found = text.match(/Workout Found:\s*([^<(]+?)\s*\(id:\s*(\d+)\)/);
+  if (found) {
+    return {
+      workoutId: Number(found[2]),
+      workoutName: decodeHtmlEntities(found[1].trim()),
+      existing: true,
+      definition,
+    };
+  }
+
+  // No match: BTWB answers with the "name it and save" form instead. Its
+  // workout[name]/[description] fields come back EMPTY - the real page fills
+  // them in client-side from the builder's knockout view model - so a caller
+  // has to supply the name itself.
+  const createForm = /id="new-workout-form"/.test(text);
+  if (!createForm) {
+    throw new Error(
+      `BTWB ${toolName}: unrecognised builder response. ${text.slice(0, 300)}`
+    );
+  }
+  if (!name) {
+    return {
+      workoutId: null,
+      existing: false,
+      created: false,
+      needsName: true,
+      message:
+        "No workout in BTWB's library matches this prescription. Pass `name` " +
+        "to create it (BTWB builds the display name in the browser, so it " +
+        "can't be derived server-side).",
+      definition,
+    };
+  }
+
+  const formToken = text.match(/name="authenticity_token" value="([^"]+)"/)?.[1] || csrfToken;
+  const createRes = await fetch(`${BASE_URL}/workouts`, {
+    method: "POST",
+    headers: {
+      Cookie: cachedCookie,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "X-CSRF-Token": csrfToken,
+    },
+    body: new URLSearchParams({
+      authenticity_token: formToken,
+      "workout[name]": name,
+      "workout[description]": description || name,
+      "workout[uiobject]": JSON.stringify(definition),
+      commit: "Save",
+    }),
+    redirect: "manual",
+  });
+
+  if (![302, 303].includes(createRes.status)) {
+    const body = await createRes.text().catch(() => "");
+    throw new Error(
+      `BTWB ${toolName} create failed: HTTP ${createRes.status}. ${body.slice(0, 300)}`
+    );
+  }
+
+  const location = createRes.headers.get("location") || "";
+  const idMatch = location.match(/\/workouts\/(\d+)-([^/?]+)/);
+  return {
+    workoutId: idMatch ? Number(idMatch[1]) : null,
+    workoutSlug: idMatch ? idMatch[2] : null,
+    workoutName: name,
+    existing: false,
+    created: true,
+    redirectedTo: location,
+    definition,
+  };
+}
+
+// Defines a single-movement "Sets" workout (e.g. "Bench Press : 3-3-3",
+// "Ring Dips : 3x Max Rep", "Bench Press : 5-5-5 at 65/75/85% 1RM").
+//
+// BTWB's builder has two branches for this - #single/weight for loaded
+// movements and #single/reps for bodyweight gymnastics - and they post
+// different prescriptions. Pass bodyweight: true for a gymnastics movement
+// (search_movement reports those with modality "gymnastics").
+//
+// All combinations below were captured from the real wizard; none is
+// predictable from the others, so the table is written out rather than derived:
+//
+//   branch      reps   type                 scoring      movement carries
+//   ---------------------------------------------------------------------------
+//   weight      fixed  weightlifting/sets   totalWeight  reps, inputs[weight]
+//   weight      max    weightlifting/sets   totalWeight  inputs[reps,weight]
+//   weight      %1RM   weightlifting/sets   completed    reps, weight, inputs[weight]
+//   gymnastics  fixed  gymnastics/sets      completed    reps
+//   gymnastics  max    gymnastics/sets      totalReps    inputs[reps]
+//
+// Note scoring flips to "completed" once the load is prescribed as a
+// percentage - there's nothing left to score when the weight is dictated.
+//
+// `contents` repeats once PER SET, so a varying wave (5/3/1, or 65/75/85%)
+// needs no special support: pass `setScheme` as one entry per set and each
+// carries its own reps and percentage.
+export async function createSetsWorkout({
+  movementName,
+  movementId,
+  sets,
+  reps,
+  maxReps = false,
+  percent,
+  setScheme,
+  bodyweight = false,
+  weightPerSet = "heaviest",
+  name,
+  description,
+}) {
+  // One entry per set: either the explicit scheme, or `sets` copies of a
+  // uniform one.
+  const scheme = setScheme
+    ? setScheme
+    : Array.from({ length: sets || 0 }, () => ({ reps, maxReps, percent }));
+
+  if (!scheme.length) {
+    throw new Error("create_sets_workout needs either sets (with reps or maxReps) or setScheme.");
+  }
+  for (const set of scheme) {
+    if (!set.maxReps && set.reps == null) {
+      throw new Error("Every set needs reps, or maxReps: true.");
+    }
+    if (set.percent != null && (set.percent <= 0 || set.percent > 200)) {
+      throw new Error(`percent looks wrong: ${set.percent} (expected a %1RM like 75).`);
+    }
+  }
+
+  const usesPercent = scheme.some((set) => set.percent != null);
+  if (usesPercent && bodyweight) {
+    throw new Error("percent applies to loaded movements; a bodyweight movement has no %1RM.");
+  }
+
+  const prescription = bodyweight
+    ? {
+        type: "gymnastics/sets",
+        scoring: scheme.every((set) => set.maxReps) ? "totalReps" : "completed",
+      }
+    : {
+        type: "weightlifting/sets",
+        weightPerSet: usesPercent ? "onerepmax" : weightPerSet,
+        scoring: usesPercent ? "completed" : "totalWeight",
+      };
+
+  const contents = scheme.map((set) => {
+    // inputs are what the logger collects afterwards: reps only when they
+    // aren't prescribed, weight only when the movement is loaded. A
+    // prescribed-reps gymnastics set collects nothing, so the key is dropped.
+    const inputs = [...(set.maxReps ? ["reps"] : []), ...(bodyweight ? [] : ["weight"])];
+    return {
+      type: "movement",
+      movementName,
+      movementId,
+      ...(set.maxReps ? {} : { reps: { value: set.reps, unit: "reps" } }),
+      ...(set.percent != null ? { weight: { value: set.percent, unit: "onerepmax" } } : {}),
+      ...(inputs.length ? { inputs } : {}),
+    };
+  });
+
+  return saveWorkoutDefinition({
+    toolName: "create_sets_workout",
+    prescription,
+    contents,
+    name,
+    description,
+  });
+}
+
+// Defines a monostructural "For Distance" workout - run/row/bike/ski for a
+// fixed time, scored on the distance covered (e.g. "Run : 30 mins"). This is
+// BTWB's third builder branch, #single/distance, alongside #single/weight and
+// #single/reps.
+//
+//   prescription: { type: "monostructural/sets", scoring: "totalDistance",
+//                   tempo?: { value, unit: "RPE" } }
+//   movement:     { time: { value, unit: "seconds" }, inputs: ["distance"] }
+//
+// `rpe` is optional and uses the Borg scale BTWB exposes (6-20): 9 is "very
+// light", 11 "fairly light", 13 "steady pace", 15 "hard", 17 "very hard". It's
+// the only way this API expresses intended effort - there's no heart-rate
+// target - so an easy aerobic run is best said as a low RPE rather than left
+// blank, which would otherwise read as "run this as hard as you can".
+export async function createForDistanceWorkout({
+  movementName,
+  movementId,
+  sets = 1,
+  durationSeconds,
+  rpe,
+  name,
+  description,
+}) {
+  if (!durationSeconds) {
+    throw new Error("create_for_distance_workout needs durationSeconds.");
+  }
+  if (rpe != null && (rpe < 6 || rpe > 20)) {
+    throw new Error(`rpe must be on BTWB's Borg scale, 6-20 (got ${rpe}).`);
+  }
+
+  const movement = {
+    type: "movement",
+    movementName,
+    movementId,
+    time: { value: Math.round(durationSeconds), unit: "seconds" },
+    inputs: ["distance"],
+  };
+
+  return saveWorkoutDefinition({
+    toolName: "create_for_distance_workout",
+    prescription: {
+      type: "monostructural/sets",
+      ...(rpe != null ? { tempo: { value: rpe, unit: "RPE" } } : {}),
+      scoring: "totalDistance",
+    },
+    contents: Array.from({ length: sets }, () => movement),
+    name,
+    description,
+  });
+}
+
+// Defines a monostructural "Intervals / Repeats" workout - repeated efforts
+// over a fixed distance, each timed (e.g. "Run : 4x 800 m at 80%, rest 2
+// mins"). Same #single/distance branch as createForDistanceWorkout; the two
+// are mirror images and differ by which dimension is prescribed:
+//
+//   For Distance : fixed time,     collects distance, scoring totalDistance
+//   Intervals    : fixed distance, collects time,     scoring totalTime
+//
+// `restSeconds` maps to BTWB's rest picker, which only offers 10/15/20/30/45/
+// 60/90/120/150/180/240 - other values are rejected.
+export async function createIntervalsWorkout({
+  movementName,
+  movementId,
+  intervals,
+  distance,
+  distanceUnit = "m",
+  restSeconds,
+  rpe,
+  name,
+  description,
+}) {
+  if (!intervals || !distance) {
+    throw new Error("create_intervals_workout needs intervals and distance.");
+  }
+  const UNITS = ["m", "km", "ft", "yd", "mi", "in"];
+  if (!UNITS.includes(distanceUnit)) {
+    throw new Error(`distanceUnit must be one of ${UNITS.join(", ")} (got "${distanceUnit}").`);
+  }
+  const RESTS = [10, 15, 20, 30, 45, 60, 90, 120, 150, 180, 240];
+  if (restSeconds != null && !RESTS.includes(restSeconds)) {
+    throw new Error(
+      `restSeconds must be one of ${RESTS.join(", ")} - BTWB's picker offers no others ` +
+        `(got ${restSeconds}).`
+    );
+  }
+  if (rpe != null && (rpe < 6 || rpe > 20)) {
+    throw new Error(`rpe must be on BTWB's Borg scale, 6-20 (got ${rpe}).`);
+  }
+
+  const movement = {
+    type: "movement",
+    movementName,
+    movementId,
+    distance: { value: distance, unit: distanceUnit },
+    inputs: ["time"],
+  };
+
+  return saveWorkoutDefinition({
+    toolName: "create_intervals_workout",
+    prescription: {
+      type: "monostructural/sets",
+      ...(restSeconds != null ? { rest: { value: restSeconds, unit: "seconds" } } : {}),
+      ...(rpe != null ? { tempo: { value: rpe, unit: "RPE" } } : {}),
+      scoring: "totalTime",
+    },
+    contents: Array.from({ length: intervals }, () => movement),
+    name,
+    description,
+  });
+}
+
+// Defines an AMRAP - as many rounds as possible of the given movements in a
+// fixed time. Scored on total rounds, which is the scoring type none of the
+// log_* tools handle yet. Movement `reps` are optional: BTWB omits the key
+// entirely when a movement has no prescribed reps.
+export async function createAmrapWorkout({ minutes, movements, name, description }) {
+  const contents = movements.map(({ movementName, movementId, reps }) => ({
+    type: "movement",
+    movementName,
+    movementId,
+    ...(reps != null ? { reps: { value: reps, unit: "reps" } } : {}),
+  }));
+
+  return saveWorkoutDefinition({
+    toolName: "create_amrap_workout",
+    prescription: {
+      type: "amrap",
+      time: { value: Math.round(minutes * 60), unit: "seconds" },
+      inputs: ["rounds"],
+      scoring: "totalRounds",
+    },
+    contents,
+    name,
+    description,
+  });
+}
+
+// Loads a workout's "Plan" form - the page behind the Plan button on any
+// workout - and returns what's needed to post it back: the form's own CSRF
+// token, the pre-generated group name, and the tracks the member can schedule
+// onto.
+async function loadPlanForm(workoutId) {
+  const html = await fetchPageHtml(`/plan/track_events/workouts/${workoutId}/new`);
+
+  // The form is server-rendered but its authenticity_token input is NOT -
+  // Rails/Turbo injects that client-side from the csrf-token meta tag ON THIS
+  // PAGE. Take it from here rather than from getCsrfToken(), which reads
+  // /whiteboard: that's a second request which can rotate the session cookie
+  // out from under the token it just minted. Same reasoning for
+  // track_event[task_id] - it's the workout id from the URL, not the markup.
+  const csrfToken = html.match(/<meta name="csrf-token" content="([^"]+)"/)?.[1];
+  if (!csrfToken) {
+    throw new Error(
+      `Could not read a CSRF token from the Plan form for workout ${workoutId}.`
+    );
+  }
+
+  // BTWB pre-fills a random group name per form; workouts sharing one land in
+  // the same session block on the calendar. Note value= precedes name= here.
+  const groupName =
+    html.match(/<input[^>]*value="([^"]+)"[^>]*name="track_event\[group_name\]"/)?.[1] || "";
+
+  const selectHtml = html.match(
+    /<select[^>]*name="track_event\[track_id\]"[\s\S]*?<\/select>/
+  )?.[0];
+  if (!selectHtml) {
+    throw new Error(
+      `Could not read the Plan form for workout ${workoutId} - check the id, ` +
+        "or BTWB's planner may have changed."
+    );
+  }
+  const tracks = [...selectHtml.matchAll(/<option value="(\d+)"[^>]*>\s*([^<]+?)\s*<\/option>/g)]
+    .map(([, id, label]) => ({ trackId: Number(id), name: decodeHtmlEntities(label) }));
+
+  return { csrfToken, groupName, tracks };
+}
+
+// The tracks this member can schedule onto, with their ids. Read from any
+// workout's Plan form, since that's where BTWB exposes the picker.
+export async function getTracks({ workoutId = 2 } = {}) {
+  const { tracks } = await loadPlanForm(workoutId);
+  return { tracks };
+}
+
+// Schedules an existing workout onto a track for a date - the same request
+// BTWB's "Plan Workout" button sends. This is what puts a workout on the
+// calendar; create_sets_workout and friends only define workouts, they don't
+// schedule them.
+//
+// Pass the same groupName for several workouts on one date to group them into
+// a single session block; omit it and each gets BTWB's own random group.
+export async function scheduleWorkout({ workoutId, trackId, date, title = "", groupName }) {
+  const form = await loadPlanForm(workoutId);
+
+  if (!trackId) {
+    const names = form.tracks.map((t) => `${t.trackId} (${t.name})`).join(", ");
+    throw new Error(`schedule_workout needs a trackId. Available: ${names || "none"}`);
+  }
+
+  // BTWB validates group_name as alphanumeric - anything else (a hyphen is
+  // enough) comes back as a 422 with the form re-rendered, which looks exactly
+  // like a CSRF rejection and is easy to misdiagnose as one. Its own values are
+  // 12-char alphanumeric tokens.
+  if (groupName && !/^[A-Za-z0-9]+$/.test(groupName)) {
+    throw new Error(
+      `schedule_workout: groupName must be alphanumeric (got "${groupName}"). ` +
+        "BTWB rejects anything else with a 422."
+    );
+  }
+
+  const body = new URLSearchParams({
+    authenticity_token: form.csrfToken,
+    "track_event[translations][content_locale]": "en-US",
+    "track_event[task_type]": "Workout",
+    "track_event[task_id]": String(workoutId),
+    "track_event[track_id]": String(trackId),
+    "track_event[event_date]": date,
+    "track_event[title]": title,
+    "track_event[group_name]": groupName || form.groupName,
+  });
+
+  const res = await fetch(`${BASE_URL}/plan/track_events/workouts`, {
+    method: "POST",
+    headers: {
+      Cookie: cachedCookie,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "X-CSRF-Token": form.csrfToken,
+    },
+    body,
+    redirect: "manual",
+  });
+
+  if (![302, 303].includes(res.status)) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`BTWB schedule_workout failed: HTTP ${res.status}. ${text.slice(0, 300)}`);
+  }
+
+  const location = res.headers.get("location") || "";
+  const trackEventId = location.match(/\/track_events\/workouts\/(\d+)/)?.[1];
+  return {
+    success: true,
+    trackEventId: trackEventId ? Number(trackEventId) : null,
+    workoutId,
+    trackId,
+    date,
+    groupName: groupName || form.groupName,
+    redirectedTo: location,
+  };
+}
+
+// Removes a scheduled workout from the calendar. Unlike workout definitions -
+// which live in BTWB's shared library and can't be deleted - a track event
+// belongs to the member, so this is the undo for schedule_workout.
+export async function deleteTrackEvent(trackEventId) {
+  const csrfToken = await getCsrfToken();
+  const res = await fetch(`${BASE_URL}/plan/track_events/${trackEventId}`, {
+    method: "DELETE",
+    headers: { Cookie: cachedCookie, "X-CSRF-Token": csrfToken, Accept: "text/html" },
+    redirect: "manual",
+  });
+  if (![200, 204, 302, 303].includes(res.status)) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `BTWB delete_track_event failed: HTTP ${res.status}. ${text.slice(0, 300)}`
+    );
+  }
+  return { success: true, trackEventId };
+}
+
 // Rails' standard destroy action - the same request its own UJS delete links
 // (data-method="delete") trigger, just issued directly as a real HTTP DELETE
 // instead of simulating the link click.

@@ -15,6 +15,13 @@ import {
   logSetsWorkout,
   logForTimeWorkout,
   getMovementHistory,
+  createSetsWorkout,
+  createAmrapWorkout,
+  createForDistanceWorkout,
+  createIntervalsWorkout,
+  getTracks,
+  scheduleWorkout,
+  deleteTrackEvent,
   getMemberId,
   getWorkoutSession,
   deleteWorkoutSession,
@@ -239,6 +246,212 @@ const TOOLS = [
     },
   },
   {
+    name: "create_for_distance_workout",
+    description:
+      "Define a monostructural 'For Distance' workout - run/row/bike/ski for a fixed " +
+      "time, scored on distance covered (e.g. 'Run : 1x 30 mins at 60%'). This is " +
+      "BTWB's third builder branch, for movements search_movement reports as modality " +
+      "'monostructural'. Like the other create tools it is find-OR-create. Use " +
+      "schedule_workout afterwards to put it on the calendar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        movementName: { type: "string", description: "Movement name exactly as BTWB spells it, e.g. 'Run'" },
+        movementId: { type: "number", description: "Numeric movement ID (from search_movement)" },
+        durationSeconds: { type: "number", description: "Duration of each effort in seconds, e.g. 1800 for 30 mins" },
+        sets: { type: "number", default: 1, description: "Number of efforts; 1 for a single continuous piece" },
+        rpe: {
+          type: "number",
+          description:
+            "Optional intended effort on BTWB's Borg scale, 6-20: 9 very light, " +
+            "11 fairly light, 13 steady pace, 15 hard, 17 very hard. This is the only " +
+            "way the API expresses effort - there is no heart-rate target - so set it " +
+            "low for easy aerobic work rather than leaving it blank, which reads as " +
+            "an all-out effort.",
+        },
+        name: { type: "string", description: "Name to create under, only used when nothing matches" },
+        description: { type: "string", description: "Optional description for a newly created workout" },
+      },
+      required: ["movementName", "movementId", "durationSeconds"],
+    },
+  },
+  {
+    name: "create_intervals_workout",
+    description:
+      "Define a monostructural intervals workout - repeated efforts over a fixed " +
+      "distance, each timed (e.g. 'Run : 4x 800 m at 80%, rest 2 mins'). Mirror image " +
+      "of create_for_distance_workout: that one fixes time and measures distance, this " +
+      "fixes distance and measures time. Find-OR-create; use schedule_workout to put " +
+      "it on the calendar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        movementName: { type: "string", description: "Movement name exactly as BTWB spells it, e.g. 'Run'" },
+        movementId: { type: "number", description: "Numeric movement ID (from search_movement)" },
+        intervals: { type: "number", description: "Number of efforts, e.g. 4 for 4x800m" },
+        distance: { type: "number", description: "Distance per effort, e.g. 800" },
+        distanceUnit: { type: "string", enum: ["m", "km", "ft", "yd", "mi", "in"], default: "m" },
+        restSeconds: {
+          type: "number",
+          enum: [10, 15, 20, 30, 45, 60, 90, 120, 150, 180, 240],
+          description: "Rest between efforts. BTWB's picker offers only these values",
+        },
+        rpe: {
+          type: "number",
+          description:
+            "Optional intended effort, Borg scale 6-20: 9 very light, 11 fairly light, " +
+            "13 steady pace, 15 hard, 17 very hard. The only way this API states effort",
+        },
+        name: { type: "string", description: "Name to create under, only used when nothing matches" },
+        description: { type: "string", description: "Optional description for a newly created workout" },
+      },
+      required: ["movementName", "movementId", "intervals", "distance"],
+    },
+  },
+  {
+    name: "get_tracks",
+    description:
+      "List the programming tracks this member can schedule onto, with their trackIds - " +
+      "schedule_workout needs one. Read from BTWB's Plan form.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "schedule_workout",
+    description:
+      "Put an existing workout on the calendar for a date - the same thing BTWB's " +
+      "'Plan Workout' button does. This is what makes a workout show up in the app; " +
+      "create_sets_workout and create_amrap_workout only DEFINE workouts in the " +
+      "library, they don't schedule them. Use get_tracks for the trackId and " +
+      "search/create tools for the workoutId. Reversible with delete_track_event.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number", description: "Numeric workout ID to schedule" },
+        trackId: { type: "number", description: "Track to schedule onto (from get_tracks)" },
+        date: { type: "string", description: "Date to schedule for, format YYYY-MM-DD" },
+        title: { type: "string", description: "Optional custom title shown on the calendar" },
+        groupName: {
+          type: "string",
+          description:
+            "Optional. Pass the same value for several workouts on one date to group " +
+            "them into a single session block; omit it and BTWB assigns its own. " +
+            "MUST be alphanumeric - BTWB rejects hyphens and anything else with a 422.",
+        },
+      },
+      required: ["workoutId", "trackId", "date"],
+    },
+  },
+  {
+    name: "delete_track_event",
+    description:
+      "Remove a scheduled workout from the calendar - the undo for schedule_workout. " +
+      "Note this deletes the CALENDAR ENTRY, not the workout definition: workouts live " +
+      "in BTWB's shared library and cannot be deleted at all.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        trackEventId: { type: "number", description: "Track event ID (returned by schedule_workout)" },
+      },
+      required: ["trackEventId"],
+    },
+  },
+  {
+    name: "create_sets_workout",
+    description:
+      "Define a single-movement Sets workout in BTWB (e.g. 'Bench Press : 3-3-3') and " +
+      "get back its workoutId/workoutSlug, which log_sets_workout then logs a result " +
+      "against. This is find-OR-create: an identical prescription resolves to the " +
+      "workout already in BTWB's shared library rather than creating a duplicate, so " +
+      "it is safe to call repeatedly and the id is usually one other athletes share " +
+      "(making results comparable). Use search_movement to get the movementId.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        movementName: { type: "string", description: "Movement name exactly as BTWB spells it, e.g. 'Bench Press'" },
+        movementId: { type: "number", description: "Numeric movement ID (from search_movement)" },
+        sets: { type: "number", description: "Number of sets, e.g. 3 for 3-3-3" },
+        reps: { type: "number", description: "Reps per set, e.g. 3 for 3-3-3. Omit when maxReps is true" },
+        maxReps: {
+          type: "boolean",
+          default: false,
+          description: "true prescribes max-effort sets ('3 x ME') instead of a fixed rep count",
+        },
+        bodyweight: {
+          type: "boolean",
+          default: false,
+          description:
+            "true for a bodyweight gymnastics movement (search_movement reports these " +
+            "with modality 'gymnastics' / posting_trait 'reps', e.g. Ring Dip, Pull-up). " +
+            "BTWB posts a different prescription for these than for loaded movements, so " +
+            "getting this wrong produces a workout that matches nothing and silently " +
+            "creates a malformed duplicate.",
+        },
+        percent: {
+          type: "number",
+          description:
+            "Prescribe the load as a % of 1RM (e.g. 70) instead of 'heaviest'. Applies " +
+            "to every set; use setScheme for a wave where the percentage changes.",
+        },
+        setScheme: {
+          type: "array",
+          description:
+            "One entry per set, for waves where reps and/or load vary - e.g. Wendler " +
+            "5/3/1 is [{reps:5,percent:75},{reps:3,percent:85},{reps:1,percent:95}]. " +
+            "Overrides sets/reps/percent when given.",
+          items: {
+            type: "object",
+            properties: {
+              reps: { type: "number", description: "Reps for this set" },
+              maxReps: { type: "boolean", description: "true for a max-effort set" },
+              percent: { type: "number", description: "Load as % of 1RM for this set" },
+            },
+          },
+        },
+        weightPerSet: {
+          type: "string",
+          enum: ["heaviest", "same", "onerepmax", "xbodyweight", "assign"],
+          default: "heaviest",
+          description: "How the weight is prescribed across sets",
+        },
+        name: { type: "string", description: "Name to create the workout under, only used when nothing in BTWB's library matches. Without it a no-match returns needsName instead of creating anything" },
+        description: { type: "string", description: "Optional description for a newly created workout; defaults to the name" },
+      },
+      required: ["movementName", "movementId"],
+    },
+  },
+  {
+    name: "create_amrap_workout",
+    description:
+      "Define an AMRAP workout in BTWB - as many rounds as possible of the given " +
+      "movements within a time cap - and get back its workoutId/workoutSlug. Scored " +
+      "on total rounds. Like create_sets_workout this is find-OR-create, so an " +
+      "identical AMRAP resolves to the existing library workout. Use search_movement " +
+      "to get each movementId. NOTE: no log_* tool can record an AMRAP result yet; " +
+      "this defines the workout only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        minutes: { type: "number", description: "Time cap in minutes, e.g. 20 for Cindy" },
+        movements: {
+          type: "array",
+          description: "Movements in the round, in order",
+          items: {
+            type: "object",
+            properties: {
+              movementName: { type: "string", description: "Movement name exactly as BTWB spells it" },
+              movementId: { type: "number", description: "Numeric movement ID (from search_movement)" },
+              reps: { type: "number", description: "Reps per round; omit for a movement with no prescribed reps" },
+            },
+            required: ["movementName", "movementId"],
+          },
+        },
+        name: { type: "string", description: "Name to create the workout under, only used when nothing in BTWB's library matches. Without it a no-match returns needsName instead of creating anything" },
+        description: { type: "string", description: "Optional description for a newly created workout; defaults to the name" },
+      },
+      required: ["minutes", "movements"],
+    },
+  },
+  {
     name: "log_sets_workout",
     description:
       "Log a set-by-set lifting result (a weightlifting/sets workout such as a class " +
@@ -424,6 +637,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "get_track_events":
         result = await getTrackEvents(args);
+        break;
+      case "create_for_distance_workout":
+        result = await createForDistanceWorkout(args);
+        break;
+      case "create_intervals_workout":
+        result = await createIntervalsWorkout(args);
+        break;
+      case "get_tracks":
+        result = await getTracks(args);
+        break;
+      case "schedule_workout":
+        result = await scheduleWorkout(args);
+        break;
+      case "delete_track_event":
+        result = await deleteTrackEvent(args.trackEventId);
+        break;
+      case "create_sets_workout":
+        result = await createSetsWorkout(args);
+        break;
+      case "create_amrap_workout":
+        result = await createAmrapWorkout(args);
         break;
       case "log_sets_workout":
         result = await logSetsWorkout(args);
