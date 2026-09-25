@@ -178,35 +178,70 @@ export async function refreshSessionCookie() {
   return { success: true };
 }
 
-async function fetchWhiteboardHtml() {
-  const res = await fetch(`${BASE_URL}/whiteboard`, {
-    headers: { Cookie: await getCookie() },
-  });
-  if (!res.ok) {
-    throw new Error(`Failed to load page for CSRF token: HTTP ${res.status}`);
+// Every logged-in page carries this; its absence is how we spot a logged-out
+// page being served in place of the one we asked for.
+const CSRF_META = /<meta name="csrf-token" content="([^"]+)"/;
+
+// Single entry point for authenticated requests. It attaches the current
+// cookie jar and merges any Set-Cookie back into it, so a rotated session
+// cookie is never dropped - BTWB ties a page's CSRF token to the
+// _btwb_session_id it was served with (see mergeSetCookies).
+//
+// `signedOut` inspects the body and says whether BTWB served its logged-out
+// page instead of what we asked for; when it did, re-login once and retry.
+// That check differs by content type, so each reader supplies its own. Writes
+// don't pass one: their CSRF token was minted against the old session, so a
+// blind retry would fail anyway - they surface the error instead.
+async function authedFetch(url, { signedOut, ...init } = {}) {
+  const send = async () => {
+    const res = await fetch(url, {
+      ...init,
+      headers: { ...init.headers, Cookie: await getCookie() },
+    });
+    cachedCookie = mergeSetCookies(cachedCookie, res.headers);
+    return { res, body: await res.text() };
+  };
+
+  let out = await send();
+  if (signedOut && signedOut(out.body)) {
+    await refreshSessionCookie();
+    out = await send();
   }
-  // Keep any rotated session cookie so the write that follows is sent with
-  // the same session this page's CSRF token belongs to.
-  cachedCookie = mergeSetCookies(cachedCookie, res.headers);
-  return res.text();
+  return out;
+}
+
+// Authenticated GET of a BTWB page, returning its HTML. A logged-out page is
+// HTML without the csrf-token meta tag.
+async function fetchHtml(path) {
+  const { res, body } = await authedFetch(`${BASE_URL}${path}`, {
+    signedOut: (html) => !CSRF_META.test(html),
+  });
+  if (!res.ok) throw new Error(`BTWB fetch of ${path} failed: HTTP ${res.status}`);
+  return body;
+}
+
+// Authenticated GET of a BTWB JSON endpoint. Two quirks this smooths over: a
+// logged-out session answers with the sign-in page's HTML rather than JSON,
+// and some endpoints answer with a 200 and an *empty body* when there's no
+// data - not "{}" or "[]" - which would otherwise throw "Unexpected end of
+// JSON input". Returns null for that case so callers supply their own empty
+// shape.
+async function fetchJson(path) {
+  const { res, body } = await authedFetch(`${BASE_URL}${path}`, {
+    signedOut: (text) => /^\s*</.test(text),
+  });
+  if (!res.ok) throw new Error(`BTWB fetch of ${path} failed: HTTP ${res.status}`);
+  return body.trim() ? JSON.parse(body) : null;
 }
 
 async function getCsrfToken() {
-  let html = await fetchWhiteboardHtml();
-  let match = html.match(/<meta name="csrf-token" content="([^"]+)"/);
+  // fetchHtml already retries once through a fresh login if the session died.
+  const match = (await fetchHtml("/whiteboard")).match(CSRF_META);
   if (!match) {
-    // Missing csrf-token usually means the session cookie has expired and
-    // BTWB served a logged-out page instead - try one automatic re-login
-    // (if configured) before falling back to the manual-copy error.
-    await refreshSessionCookie();
-    html = await fetchWhiteboardHtml();
-    match = html.match(/<meta name="csrf-token" content="([^"]+)"/);
-    if (!match) {
-      throw new Error(
-        "Could not find a CSRF token on the page even after refreshing the session - " +
-          "BTWB's login page may have changed."
-      );
-    }
+    throw new Error(
+      "Could not find a CSRF token on the page even after refreshing the session - " +
+        "BTWB's login page may have changed."
+    );
   }
   return match[1];
 }
@@ -220,32 +255,20 @@ let cachedMemberId;
 export async function getMemberId() {
   if (cachedMemberId) return cachedMemberId;
 
-  const pattern = /href="\/analyze\/members\/(\d+)"/;
-  let match = (await fetchWhiteboardHtml()).match(pattern);
+  const match = (await fetchHtml("/whiteboard")).match(/href="\/analyze\/members\/(\d+)"/);
   if (!match) {
-    // Same expired-session fallback as getCsrfToken().
-    await refreshSessionCookie();
-    match = (await fetchWhiteboardHtml()).match(pattern);
-    if (!match) {
-      throw new Error(
-        "Could not find your member ID on the BTWB whiteboard page even after " +
-          "refreshing the session - BTWB's navigation markup may have changed."
-      );
-    }
+    throw new Error(
+      "Could not find your member ID on the BTWB whiteboard page even after " +
+        "refreshing the session - BTWB's navigation markup may have changed."
+    );
   }
   cachedMemberId = Number(match[1]);
   return cachedMemberId;
 }
 
 export async function searchMovement(term) {
-  const res = await fetch(
-    `${BASE_URL}/exercises/autocomplete_name.json?posting_trait=true&term=${encodeURIComponent(term)}`,
-    { headers: { Cookie: await getCookie() } }
-  );
-  if (!res.ok) {
-    throw new Error(`BTWB movement search failed: HTTP ${res.status}`);
-  }
-  return res.json();
+  const path = `/exercises/autocomplete_name.json?posting_trait=true&term=${encodeURIComponent(term)}`;
+  return (await fetchJson(path)) ?? [];
 }
 
 export async function logWorkout({
@@ -421,7 +444,7 @@ export async function logRoundsWorkout({
 // case-insensitive substring of the track name (e.g. "class").
 export async function getTrackEvents({ date, track } = {}) {
   const memberId = await getMemberId();
-  const html = await fetchPageHtml(`/members/${memberId}/whiteboard/day?d=${date}`);
+  const html = await fetchHtml(`/members/${memberId}/whiteboard/day?d=${date}`);
 
   const trackNames = {};
   for (const [, key, name] of html.matchAll(
@@ -454,7 +477,7 @@ export async function getTrackEvents({ date, track } = {}) {
   }
 
   for (const event of events.filter((e) => e.kind === "workout")) {
-    const details = await fetchPageHtml(
+    const details = await fetchHtml(
       `/tasks/members/${memberId}/track_events/${event.trackEventId}`
     ).catch(() => "");
     const workout = details.match(/href="\/workouts\/(\d+)-([^"/?]+)"/);
@@ -471,7 +494,7 @@ export async function getTrackEvents({ date, track } = {}) {
 // prescription (the `var uiobject` BTWB's logger is seeded with) - the
 // starting point for logging a result against that exact workout.
 async function loadPrescribedWorkout(workoutId, workoutSlug, performedDate) {
-  const html = await fetchPageHtml(
+  const html = await fetchHtml(
     `/workouts/${workoutId}-${workoutSlug}/workout_sessions/new?d=${performedDate}`
   );
   const csrfToken = html.match(/<meta name="csrf-token" content="([^"]+)"/)?.[1];
@@ -701,25 +724,13 @@ export async function logWeighIn({
   notes = "",
 }) {
   const memberId = await getMemberId();
-  const formUrl = `${BASE_URL}/members/${memberId}/weigh_ins/new`;
-
-  let res = await fetch(formUrl, { headers: { Cookie: await getCookie() } });
-  cachedCookie = mergeSetCookies(cachedCookie, res.headers);
-  let html = await res.text();
-  let tokenMatch = html.match(/<meta name="csrf-token" content="([^"]+)"/);
+  const html = await fetchHtml(`/members/${memberId}/weigh_ins/new`);
+  const tokenMatch = html.match(CSRF_META);
   if (!tokenMatch) {
-    // Same expired-session fallback as getCsrfToken().
-    await refreshSessionCookie();
-    res = await fetch(formUrl, { headers: { Cookie: await getCookie() } });
-    cachedCookie = mergeSetCookies(cachedCookie, res.headers);
-    html = await res.text();
-    tokenMatch = html.match(/<meta name="csrf-token" content="([^"]+)"/);
-    if (!tokenMatch) {
-      throw new Error(
-        "Could not find a CSRF token on the BTWB New Weigh In page even after " +
-          "refreshing the session - the page may have changed."
-      );
-    }
+    throw new Error(
+      "Could not find a CSRF token on the BTWB New Weigh In page even after " +
+        "refreshing the session - the page may have changed."
+    );
   }
   const csrfToken = tokenMatch[1];
   const heightMatch = html.match(/value="([\d.]+)"[^>]*name="weigh_in\[height\]"/);
@@ -759,7 +770,7 @@ export async function logWeighIn({
     body.set("weigh_in[percent_body_fat]", String(percentBodyFat));
   }
 
-  res = await fetch(`${BASE_URL}/weigh_ins`, {
+  const res = await fetch(`${BASE_URL}/weigh_ins`, {
     method: "POST",
     headers: {
       Cookie: cachedCookie,
@@ -786,7 +797,7 @@ export async function logWeighIn({
 // filters to entries within that many days of now.
 export async function getWeighIns({ days } = {}) {
   const memberId = await getMemberId();
-  const html = await fetchPageHtml(`/members/${memberId}/weigh_ins`);
+  const html = await fetchHtml(`/members/${memberId}/weigh_ins`);
 
   const cutoff = days != null ? Date.now() - days * 86400000 : null;
   const entries = [];
@@ -818,14 +829,12 @@ export async function getWeighIns({ days } = {}) {
 export async function getMovementHistory({ memberId, movementId, movementSlug, days = 365 }) {
   memberId ??= await getMemberId();
   const seconds = Math.round(days * 86400);
-  const res = await fetch(
-    `${BASE_URL}/members/${memberId}/movements/${movementId}-${movementSlug}/vmax?d=${seconds}`,
-    { headers: { Cookie: await getCookie() } }
+  const data = await fetchJson(
+    `/members/${memberId}/movements/${movementId}-${movementSlug}/vmax?d=${seconds}`
   );
-  if (!res.ok) {
-    throw new Error(`BTWB movement history fetch failed: HTTP ${res.status}`);
-  }
-  return res.json();
+  // An empty body means the member has no logged sets for this movement in
+  // the window - report an empty chart rather than failing.
+  return data ?? { series: [], units: null };
 }
 
 // Rails' standard destroy action - the same request its own UJS delete links
@@ -918,20 +927,4 @@ export async function getWorkoutSession(sessionId) {
     level: levelMatch ? Number(levelMatch[1]) : null,
     wodRank: wodRankMatch ? Number(wodRankMatch[1]) : null,
   };
-}
-
-// Authenticated GET of any BTWB page, returning its HTML - with the same
-// expired-session fallback as getCsrfToken(). Used by the scraping readers.
-async function fetchPageHtml(path) {
-  let res = await fetch(`${BASE_URL}${path}`, { headers: { Cookie: await getCookie() } });
-  cachedCookie = mergeSetCookies(cachedCookie, res.headers);
-  let html = await res.text();
-  if (!/<meta name="csrf-token"/.test(html)) {
-    await refreshSessionCookie();
-    res = await fetch(`${BASE_URL}${path}`, { headers: { Cookie: await getCookie() } });
-    cachedCookie = mergeSetCookies(cachedCookie, res.headers);
-    html = await res.text();
-  }
-  if (!res.ok) throw new Error(`BTWB fetch of ${path} failed: HTTP ${res.status}`);
-  return html;
 }
