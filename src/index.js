@@ -18,6 +18,7 @@ import {
   getMemberId,
   getWorkoutSession,
   deleteWorkoutSession,
+  deleteWeighIn,
   refreshSessionCookie,
 } from "./btwb-client.js";
 
@@ -387,6 +388,25 @@ const TOOLS = [
     },
   },
   {
+    name: "delete_weigh_in",
+    description:
+      "Permanently delete an already-logged entry from BTWB's Weigh-Ins tracker " +
+      "(beyondthewhiteboard.com/weigh_ins/{id}) by its numeric id - the id " +
+      "get_weigh_ins returns for each entry. This cannot be undone - BTWB has no " +
+      "trash/undo for deleted weigh-ins. Use this to remove a mis-dated or " +
+      "duplicate entry (e.g. one logged with the wrong date/time by mistake).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        weighInId: {
+          type: "number",
+          description: "The weigh_ins ID to delete (from get_weigh_ins' entries[].id)",
+        },
+      },
+      required: ["weighInId"],
+    },
+  },
+  {
     name: "refresh_session_cookie",
     description:
       "Manually re-authenticate to BTWB and replace the stored session cookie with a " +
@@ -442,6 +462,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "delete_workout_session":
         result = await deleteWorkoutSession(args.sessionId);
+        break;
+      case "delete_weigh_in":
+        result = await deleteWeighIn(args.weighInId);
         break;
       case "refresh_session_cookie":
         result = await refreshSessionCookie();
