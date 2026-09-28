@@ -1148,13 +1148,38 @@ export async function createIntervalsWorkout({
 // fixed time. Scored on total rounds, which is the scoring type none of the
 // log_* tools handle yet. Movement `reps` are optional: BTWB omits the key
 // entirely when a movement has no prescribed reps.
-export async function createAmrapWorkout({ minutes, movements, name, description }) {
-  const contents = movements.map(({ movementName, movementId, reps }) => ({
+// One movement inside a metcon round. BTWB carries each prescribed measure as a
+// separate top-level {value, unit} key - `reps` for counted work, `distance` for
+// carries and monostructural pieces, `weight` for loaded movements - and a
+// movement can hold several at once (8 Sandbag Over Shoulder at 100 lbs is both
+// `reps` and `weight`; a 24 in Box Jump is `reps` and `height`). Calories are NOT a measure: BTWB models them as reps
+// against a dedicated movement, e.g. "Row Calorie" (2073), whose posting_trait
+// is `reps`. Unlike the sets builder these movements carry no `inputs` - the
+// athlete's entry is declared once on the prescription, not per movement.
+function metconMovement({
+  movementName,
+  movementId,
+  reps,
+  weight,
+  weightUnit = "lbs",
+  distance,
+  distanceUnit = "m",
+  height,
+  heightUnit = "in",
+}) {
+  return {
     type: "movement",
     movementName,
     movementId,
     ...(reps != null ? { reps: { value: reps, unit: "reps" } } : {}),
-  }));
+    ...(distance != null ? { distance: { value: distance, unit: distanceUnit } } : {}),
+    ...(weight != null ? { weight: { value: weight, unit: weightUnit } } : {}),
+    ...(height != null ? { height: { value: height, unit: heightUnit } } : {}),
+  };
+}
+
+export async function createAmrapWorkout({ minutes, movements, name, description }) {
+  const contents = movements.map((m) => metconMovement(m));
 
   return saveWorkoutDefinition({
     toolName: "create_amrap_workout",
@@ -1174,6 +1199,33 @@ export async function createAmrapWorkout({ minutes, movements, name, description
 // workout - and returns what's needed to post it back: the form's own CSRF
 // token, the pre-generated group name, and the tracks the member can schedule
 // onto.
+// For time - one round, or N rounds of the same movements ("3 RFT: 9 Power
+// Cleans, 9 Ring Dips, 12 Box Jumps").
+//
+// There is no `rounds` field. BTWB stores rounds by REPEATING the contents
+// array, exactly as the sets builder repeats a movement per set - a 3-round
+// Helen is nine movement entries, not three with a multiplier. Probing the
+// live builder confirmed this: `{rounds: 3}` on the prescription matched
+// nothing, while the flat 3x repeat resolved to an existing library workout
+// whose name ends "and 6 more".
+export async function createForTimeWorkout({
+  rounds = 1,
+  movements,
+  name,
+  description,
+}) {
+  const round = movements.map((m) => metconMovement(m));
+  const contents = Array.from({ length: rounds }, () => round).flat();
+
+  return saveWorkoutDefinition({
+    toolName: "create_for_time_workout",
+    prescription: { type: "forTime", inputs: ["time"], scoring: "totalTime" },
+    contents,
+    name,
+    description,
+  });
+}
+
 async function loadPlanForm(workoutId) {
   const html = await fetchPageHtml(`/plan/track_events/workouts/${workoutId}/new`);
 

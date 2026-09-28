@@ -17,6 +17,7 @@ import {
   getMovementHistory,
   createSetsWorkout,
   createAmrapWorkout,
+  createForTimeWorkout,
   createForDistanceWorkout,
   createIntervalsWorkout,
   getTracks,
@@ -316,6 +317,68 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "create_for_time_workout",
+    description:
+      "Define a For Time workout in BTWB - a fixed amount of work done as fast as " +
+      "possible, scored on elapsed time. Covers both a single round ('FT: 30 Clean & " +
+      "Jerks') and N rounds of the same movements ('3 RFT: 400 m Run, 21 Kettlebell " +
+      "Swings, 12 Pull-ups'), via the `rounds` argument. Find-OR-create like the other " +
+      "builders, so an identical prescription resolves to the workout already in BTWB's " +
+      "shared library. Use search_movement for each movementId, then schedule_workout " +
+      "to put it on the calendar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        rounds: {
+          type: "number",
+          default: 1,
+          description:
+            "How many times to repeat the movements. 1 for a single-round chipper, 3 for " +
+            "'3 rounds for time'. Descending ladders like Fran (21-15-9) are NOT rounds - " +
+            "pass rounds: 1 and list every movement explicitly in order.",
+        },
+        movements: {
+          type: "array",
+          description: "Movements in one round, in order",
+          items: {
+            type: "object",
+            properties: {
+              movementName: { type: "string", description: "Movement name exactly as BTWB spells it" },
+              movementId: { type: "number", description: "Numeric movement ID (from search_movement)" },
+              reps: { type: "number", description: "Reps per round; omit for a movement with no prescribed reps" },
+              weight: {
+                type: "number",
+                description:
+                  "Prescribed load, e.g. 95 for 95 lb thrusters. Omit for bodyweight movements.",
+              },
+              weightUnit: { type: "string", enum: ["lbs", "kg"], default: "lbs" },
+              distance: {
+                type: "number",
+                description:
+                  "Prescribed distance for carries, runs and rows, e.g. 400 for a 400 m run " +
+                  "or 100 for a 100 ft farmer carry. NOTE calories are not a distance and not " +
+                  "a unit here - BTWB models them as REPS against a dedicated movement such " +
+                  "as 'Row Calorie' (2073), so a 12 calorie row is reps: 12 on that movement.",
+              },
+              distanceUnit: { type: "string", enum: ["m", "km", "ft", "yd", "mi", "in"], default: "m" },
+              height: {
+                type: "number",
+                description:
+                  "Prescribed height for box jumps and similar, e.g. 24 for a 24 in box. " +
+                  "search_movement reports these with posting_trait 'height'.",
+              },
+              heightUnit: { type: "string", enum: ["in", "ft", "cm"], default: "in" },
+            },
+            required: ["movementName", "movementId"],
+          },
+        },
+        name: { type: "string", description: "Name to create the workout under, only used when nothing in BTWB's library matches. Without it a no-match returns needsName instead of creating anything" },
+        description: { type: "string", description: "Optional description for a newly created workout; defaults to the name" },
+      },
+      required: ["movements"],
+    },
+  },
+  {
     name: "schedule_workout",
     description:
       "Put an existing workout on the calendar for a date - the same thing BTWB's " +
@@ -441,6 +504,28 @@ const TOOLS = [
               movementName: { type: "string", description: "Movement name exactly as BTWB spells it" },
               movementId: { type: "number", description: "Numeric movement ID (from search_movement)" },
               reps: { type: "number", description: "Reps per round; omit for a movement with no prescribed reps" },
+              weight: {
+                type: "number",
+                description:
+                  "Prescribed load, e.g. 95 for 95 lb thrusters. Omit for bodyweight movements.",
+              },
+              weightUnit: { type: "string", enum: ["lbs", "kg"], default: "lbs" },
+              distance: {
+                type: "number",
+                description:
+                  "Prescribed distance for carries, runs and rows, e.g. 400 for a 400 m run " +
+                  "or 100 for a 100 ft farmer carry. NOTE calories are not a distance and not " +
+                  "a unit here - BTWB models them as REPS against a dedicated movement such " +
+                  "as 'Row Calorie' (2073), so a 12 calorie row is reps: 12 on that movement.",
+              },
+              distanceUnit: { type: "string", enum: ["m", "km", "ft", "yd", "mi", "in"], default: "m" },
+              height: {
+                type: "number",
+                description:
+                  "Prescribed height for box jumps and similar, e.g. 24 for a 24 in box. " +
+                  "search_movement reports these with posting_trait 'height'.",
+              },
+              heightUnit: { type: "string", enum: ["in", "ft", "cm"], default: "in" },
             },
             required: ["movementName", "movementId"],
           },
@@ -658,6 +743,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "create_amrap_workout":
         result = await createAmrapWorkout(args);
+        break;
+      case "create_for_time_workout":
+        result = await createForTimeWorkout(args);
         break;
       case "log_sets_workout":
         result = await logSetsWorkout(args);
