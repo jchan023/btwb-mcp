@@ -865,22 +865,20 @@ export async function deleteWorkoutSession(sessionId) {
 
 // Same Rails destroy pattern as deleteWorkoutSession, but against /weigh_ins/{id}
 // instead of /workout_sessions/{id} - the two are separate resources on BTWB.
+// Routed through authedFetch (no signedOut predicate - like other writes, a
+// blind retry would carry a CSRF token minted against the old session and
+// just fail again) so any rotated session cookie is still merged back in.
 export async function deleteWeighIn(weighInId) {
   const csrfToken = await getCsrfToken();
-  const cookie = await getCookie();
 
-  const res = await fetch(`${BASE_URL}/weigh_ins/${weighInId}`, {
+  const { res, body } = await authedFetch(`${BASE_URL}/weigh_ins/${weighInId}`, {
     method: "DELETE",
-    headers: {
-      Cookie: cookie,
-      "X-CSRF-Token": csrfToken,
-    },
+    headers: { "X-CSRF-Token": csrfToken },
     redirect: "manual",
   });
 
   if (![200, 204, 302, 303].includes(res.status)) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`BTWB delete_weigh_in failed: HTTP ${res.status}. ${text.slice(0, 300)}`);
+    throw new Error(`BTWB delete_weigh_in failed: HTTP ${res.status}. ${body.slice(0, 300)}`);
   }
 
   return { success: true, weighInId };
