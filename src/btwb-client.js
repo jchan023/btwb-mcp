@@ -11,8 +11,28 @@ const BASE_URL = "https://beyondthewhiteboard.com";
 const KEYCHAIN_SERVICE = "btwb-session-cookie";
 const PASSWORD_KEYCHAIN_SERVICE = "btwb-password";
 
+// Without this, a hung BTWB request would hang the MCP tool call (Node's fetch
+// has no overall timeout). Applies to the whole exchange, body included.
+const REQUEST_TIMEOUT_MS = Number(process.env.BTWB_REQUEST_TIMEOUT_MS) || 30_000;
+
 let cachedCookie;
 let keychainError;
+
+// fetch() plus reading the body, both under REQUEST_TIMEOUT_MS. A timeout
+// surfaces as a plain Error naming the path instead of a bare DOMException.
+async function fetchText(url, init = {}) {
+  try {
+    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    return { res, body: await res.text() };
+  } catch (err) {
+    if (err?.name === "TimeoutError") {
+      throw new Error(
+        `BTWB request to ${new URL(url).pathname} timed out after ${REQUEST_TIMEOUT_MS / 1000}s`
+      );
+    }
+    throw err;
+  }
+}
 
 // Merges a response's Set-Cookie headers into a "name=value; name2=value2"
 // Cookie string, replacing same-named cookies. BTWB sets more than one cookie
@@ -119,9 +139,8 @@ export async function refreshSessionCookie() {
     );
   }
 
-  const signinRes = await fetch(`${BASE_URL}/signin`);
+  const { res: signinRes, body: signinHtml } = await fetchText(`${BASE_URL}/signin`);
   const signinCookie = mergeSetCookies("", signinRes.headers);
-  const signinHtml = await signinRes.text();
   const tokenMatch = signinHtml.match(/name="authenticity_token" value="([^"]+)"/);
   if (!tokenMatch) {
     throw new Error("Could not find a CSRF token on the BTWB sign-in page - it may have changed.");
@@ -135,7 +154,7 @@ export async function refreshSessionCookie() {
     commit: "Sign In",
   });
 
-  const loginRes = await fetch(`${BASE_URL}/session`, {
+  const { res: loginRes } = await fetchText(`${BASE_URL}/session`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -194,12 +213,12 @@ const CSRF_META = /<meta name="csrf-token" content="([^"]+)"/;
 // blind retry would fail anyway - they surface the error instead.
 async function authedFetch(url, { signedOut, ...init } = {}) {
   const send = async () => {
-    const res = await fetch(url, {
+    const { res, body } = await fetchText(url, {
       ...init,
       headers: { ...init.headers, Cookie: await getCookie() },
     });
     cachedCookie = mergeSetCookies(cachedCookie, res.headers);
-    return { res, body: await res.text() };
+    return { res, body };
   };
 
   let out = await send();
