@@ -210,6 +210,24 @@ async function authedFetch(url, { signedOut, ...init } = {}) {
   return out;
 }
 
+// Authenticated write (form POST, or a bodyless DELETE) to a BTWB endpoint.
+// Goes through authedFetch so a rotated session cookie is merged back in, but
+// passes no `signedOut` check - the CSRF token was minted against the old
+// session, so a blind retry would fail anyway and the caller surfaces the
+// error instead. Redirects are not followed: Rails answers a successful write
+// with a 302/303 whose Location the callers report.
+function sendWrite(url, { method = "POST", csrfToken, form }) {
+  return authedFetch(url, {
+    method,
+    headers: {
+      "X-CSRF-Token": csrfToken,
+      ...(form ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+    },
+    ...(form ? { body: form } : {}),
+    redirect: "manual",
+  });
+}
+
 // Authenticated GET of a BTWB page, returning its HTML. A logged-out page is
 // HTML without the csrf-token meta tag.
 async function fetchHtml(path) {
@@ -281,7 +299,6 @@ export async function logWorkout({
   notes = "",
 }) {
   const csrfToken = await getCsrfToken();
-  const cookie = await getCookie();
 
   const definition = {
     type: "workoutSession",
@@ -313,20 +330,13 @@ export async function logWorkout({
     commit: "Log Result",
   });
 
-  const res = await fetch(`${BASE_URL}/workouts/logger`, {
-    method: "POST",
-    headers: {
-      Cookie: cookie,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "X-CSRF-Token": csrfToken,
-    },
-    body,
-    redirect: "manual",
+  const { res, body: text } = await sendWrite(`${BASE_URL}/workouts/logger`, {
+    csrfToken,
+    form: body,
   });
 
   // Rails redirects (302/303) to the new workout_session on success.
   if (![302, 303].includes(res.status)) {
-    const text = await res.text().catch(() => "");
     throw new Error(
       `BTWB log_workout failed: HTTP ${res.status}. ${text.slice(0, 300)}`
     );
@@ -360,7 +370,6 @@ export async function logRoundsWorkout({
   trackEventId,
 }) {
   const csrfToken = await getCsrfToken();
-  const cookie = await getCookie();
 
   const uiobject = {
     type: "workoutSession",
@@ -406,22 +415,12 @@ export async function logRoundsWorkout({
     body.append("track_event_ids[]", String(trackEventId));
   }
 
-  const res = await fetch(
+  const { res, body: text } = await sendWrite(
     `${BASE_URL}/workouts/${workoutId}-${workoutSlug}/workout_sessions`,
-    {
-      method: "POST",
-      headers: {
-        Cookie: cookie,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "X-CSRF-Token": csrfToken,
-      },
-      body,
-      redirect: "manual",
-    }
+    { csrfToken, form: body }
   );
 
   if (![302, 303].includes(res.status)) {
-    const text = await res.text().catch(() => "");
     throw new Error(
       `BTWB log_rounds_workout failed: HTTP ${res.status}. ${text.slice(0, 300)}`
     );
@@ -544,19 +543,12 @@ async function postPrescribedSession({
     body.append("track_event_ids[]", String(trackEventId));
   }
 
-  const res = await fetch(`${BASE_URL}/workouts/${workoutId}-${workoutSlug}/workout_sessions`, {
-    method: "POST",
-    headers: {
-      Cookie: cachedCookie,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "X-CSRF-Token": csrfToken,
-    },
-    body,
-    redirect: "manual",
-  });
+  const { res, body: text } = await sendWrite(
+    `${BASE_URL}/workouts/${workoutId}-${workoutSlug}/workout_sessions`,
+    { csrfToken, form: body }
+  );
 
   if (![302, 303].includes(res.status)) {
-    const text = await res.text().catch(() => "");
     const errors = [...text.matchAll(/<li>([^<]+)<\/li>/g)]
       .map((m) => m[1])
       .filter((t) => /must|can't|invalid|blank/i.test(t));
@@ -770,21 +762,14 @@ export async function logWeighIn({
     body.set("weigh_in[percent_body_fat]", String(percentBodyFat));
   }
 
-  const res = await fetch(`${BASE_URL}/weigh_ins`, {
-    method: "POST",
-    headers: {
-      Cookie: cachedCookie,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "X-CSRF-Token": csrfToken,
-    },
-    body,
-    redirect: "manual",
+  const { res, body: text } = await sendWrite(`${BASE_URL}/weigh_ins`, {
+    csrfToken,
+    form: body,
   });
 
   // Rails redirects (302/303) on success; a 200 means the form re-rendered
   // with validation errors.
   if (![302, 303].includes(res.status)) {
-    const text = await res.text().catch(() => "");
     throw new Error(`BTWB log_weigh_in failed: HTTP ${res.status}. ${text.slice(0, 300)}`);
   }
 
@@ -842,21 +827,15 @@ export async function getMovementHistory({ memberId, movementId, movementSlug, d
 // instead of simulating the link click.
 export async function deleteWorkoutSession(sessionId) {
   const csrfToken = await getCsrfToken();
-  const cookie = await getCookie();
 
-  const res = await fetch(`${BASE_URL}/workout_sessions/${sessionId}`, {
+  const { res, body } = await sendWrite(`${BASE_URL}/workout_sessions/${sessionId}`, {
     method: "DELETE",
-    headers: {
-      Cookie: cookie,
-      "X-CSRF-Token": csrfToken,
-    },
-    redirect: "manual",
+    csrfToken,
   });
 
   if (![200, 204, 302, 303].includes(res.status)) {
-    const text = await res.text().catch(() => "");
     throw new Error(
-      `BTWB delete_workout_session failed: HTTP ${res.status}. ${text.slice(0, 300)}`
+      `BTWB delete_workout_session failed: HTTP ${res.status}. ${body.slice(0, 300)}`
     );
   }
 
@@ -865,16 +844,12 @@ export async function deleteWorkoutSession(sessionId) {
 
 // Same Rails destroy pattern as deleteWorkoutSession, but against /weigh_ins/{id}
 // instead of /workout_sessions/{id} - the two are separate resources on BTWB.
-// Routed through authedFetch (no signedOut predicate - like other writes, a
-// blind retry would carry a CSRF token minted against the old session and
-// just fail again) so any rotated session cookie is still merged back in.
 export async function deleteWeighIn(weighInId) {
   const csrfToken = await getCsrfToken();
 
-  const { res, body } = await authedFetch(`${BASE_URL}/weigh_ins/${weighInId}`, {
+  const { res, body } = await sendWrite(`${BASE_URL}/weigh_ins/${weighInId}`, {
     method: "DELETE",
-    headers: { "X-CSRF-Token": csrfToken },
-    redirect: "manual",
+    csrfToken,
   });
 
   if (![200, 204, 302, 303].includes(res.status)) {
@@ -902,13 +877,7 @@ function decodeHtmlEntities(str) {
 // changes their markup, or a workout type renders differently, the relevant
 // field will just come back null/empty rather than throwing.
 export async function getWorkoutSession(sessionId) {
-  const res = await fetch(`${BASE_URL}/workout_sessions/${sessionId}`, {
-    headers: { Cookie: await getCookie() },
-  });
-  if (!res.ok) {
-    throw new Error(`BTWB workout session fetch failed: HTTP ${res.status}`);
-  }
-  const html = await res.text();
+  const html = await fetchHtml(`/workout_sessions/${sessionId}`);
 
   const nameMatch = html.match(
     /class="h4 fw-semibold text-dark text-uppercase text-decoration-none d-none d-lg-block"[^>]*>([^<]+)<\/a>/
