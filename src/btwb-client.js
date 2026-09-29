@@ -235,15 +235,16 @@ async function authedFetch(url, { signedOut, ...init } = {}) {
 // session, so a blind retry would fail anyway and the caller surfaces the
 // error instead. Redirects are not followed: Rails answers a successful write
 // with a 302/303 whose Location the callers report.
-function sendWrite(url, { method = "POST", csrfToken, form }) {
+function sendWrite(url, { method = "POST", csrfToken, form, headers, redirect = "manual" }) {
   return authedFetch(url, {
     method,
     headers: {
+      ...headers,
       "X-CSRF-Token": csrfToken,
       ...(form ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
     },
     ...(form ? { body: form } : {}),
-    redirect: "manual",
+    redirect,
   });
 }
 
@@ -841,6 +842,31 @@ export async function getMovementHistory({ memberId, movementId, movementSlug, d
   return data ?? { series: [], units: null };
 }
 
+const isPositiveInt = (n) => Number.isInteger(n) && n > 0;
+
+// A real calendar date in YYYY-MM-DD form (rejects 2026-02-31, not just bad shapes).
+function isValidIsoDate(date) {
+  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const d = new Date(`${date}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === date;
+}
+
+// Metcon movement lists are posted into BTWB's shared library, so an empty or
+// malformed one must fail here rather than create a junk definition.
+function requireMovements(toolName, movements) {
+  if (!Array.isArray(movements) || !movements.length) {
+    throw new Error(`${toolName} needs at least one movement.`);
+  }
+  for (const m of movements) {
+    if (!m || !m.movementName || !isPositiveInt(m.movementId)) {
+      throw new Error(`${toolName}: every movement needs movementName and a numeric movementId.`);
+    }
+    if (m.reps != null && !isPositiveInt(m.reps)) {
+      throw new Error(`${toolName}: reps must be a positive integer (got ${m.reps}).`);
+    }
+  }
+}
+
 // Posts a workout *definition* (a prescription, not a result) to BTWB's
 // workout builder - the same request its "Build Workout" wizard submits when
 // you press "Next: Confirm & Save". Captured by filling the wizard in and
@@ -860,24 +886,20 @@ async function saveWorkoutDefinition({ toolName, prescription, contents, name, d
   const csrfToken = await getCsrfToken();
   const definition = { type: "workout", prescription, contents };
 
-  const res = await fetch(`${BASE_URL}/workouts/builder/save`, {
-    method: "POST",
-    headers: {
-      Cookie: cachedCookie,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "X-CSRF-Token": csrfToken,
-    },
-    body: new URLSearchParams({ definition: JSON.stringify(definition) }),
+  // Redirects are followed here (unlike the other writes): the builder answers
+  // with a page, not a redirect.
+  const { res, body: text } = await sendWrite(`${BASE_URL}/workouts/builder/save`, {
+    csrfToken,
+    form: new URLSearchParams({ definition: JSON.stringify(definition) }),
+    redirect: "follow",
   });
-
-  const text = await res.text();
   if (!res.ok) {
     throw new Error(`BTWB ${toolName} failed: HTTP ${res.status}. ${text.slice(0, 300)}`);
   }
 
   // Match found - BTWB resolved the prescription to a workout already in its
   // library and there's nothing to create.
-  const found = text.match(/Workout Found:\s*([^<(]+?)\s*\(id:\s*(\d+)\)/);
+  const found = text.match(/Workout Found:\s*([^<]+?)\s*\(id:\s*(\d+)\)/);
   if (found) {
     return {
       workoutId: Number(found[2]),
@@ -911,28 +933,26 @@ async function saveWorkoutDefinition({ toolName, prescription, contents, name, d
     };
   }
 
+  // The form's own token was minted against the session as it is *now* (the
+  // save above may have rotated the cookie), so it goes in both the header and
+  // the body rather than pairing it with the older token from /whiteboard.
   const formToken = text.match(/name="authenticity_token" value="([^"]+)"/)?.[1] || csrfToken;
-  const createRes = await fetch(`${BASE_URL}/workouts`, {
-    method: "POST",
-    headers: {
-      Cookie: cachedCookie,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "X-CSRF-Token": csrfToken,
-    },
-    body: new URLSearchParams({
+  const { res: createRes, body: createBody } = await sendWrite(`${BASE_URL}/workouts`, {
+    csrfToken: formToken,
+    form: new URLSearchParams({
       authenticity_token: formToken,
       "workout[name]": name,
       "workout[description]": description || name,
       "workout[uiobject]": JSON.stringify(definition),
       commit: "Save",
     }),
-    redirect: "manual",
   });
 
+  // Rails answers a successful create with a redirect; a 200 or 422 is the
+  // form re-rendered with errors.
   if (![302, 303].includes(createRes.status)) {
-    const body = await createRes.text().catch(() => "");
     throw new Error(
-      `BTWB ${toolName} create failed: HTTP ${createRes.status}. ${body.slice(0, 300)}`
+      `BTWB ${toolName} create failed: HTTP ${createRes.status}. ${createBody.slice(0, 300)}`
     );
   }
 
@@ -993,12 +1013,15 @@ export async function createSetsWorkout({
     ? setScheme
     : Array.from({ length: sets || 0 }, () => ({ reps, maxReps, percent }));
 
+  if (setScheme ? !Array.isArray(setScheme) : sets != null && !isPositiveInt(sets)) {
+    throw new Error("create_sets_workout: sets must be a positive integer, or setScheme an array.");
+  }
   if (!scheme.length) {
     throw new Error("create_sets_workout needs either sets (with reps or maxReps) or setScheme.");
   }
   for (const set of scheme) {
-    if (!set.maxReps && set.reps == null) {
-      throw new Error("Every set needs reps, or maxReps: true.");
+    if (!set.maxReps && !isPositiveInt(set.reps)) {
+      throw new Error("Every set needs a positive integer reps, or maxReps: true.");
     }
     if (set.percent != null && (set.percent <= 0 || set.percent > 200)) {
       throw new Error(`percent looks wrong: ${set.percent} (expected a %1RM like 75).`);
@@ -1006,6 +1029,11 @@ export async function createSetsWorkout({
   }
 
   const usesPercent = scheme.some((set) => set.percent != null);
+  // Scoring and the load unit are prescription-wide, so a scheme that gives some
+  // sets a %1RM and others no load is not something BTWB can represent.
+  if (usesPercent && !scheme.every((set) => set.percent != null)) {
+    throw new Error("Either every set has a percent or none does.");
+  }
   if (usesPercent && bodyweight) {
     throw new Error("percent applies to loaded movements; a bodyweight movement has no %1RM.");
   }
@@ -1017,6 +1045,7 @@ export async function createSetsWorkout({
       }
     : {
         type: "weightlifting/sets",
+        // %1RM loads dictate the weight, so weightPerSet is ignored when percent is set.
         weightPerSet: usesPercent ? "onerepmax" : weightPerSet,
         scoring: usesPercent ? "completed" : "totalWeight",
       };
@@ -1068,8 +1097,11 @@ export async function createForDistanceWorkout({
   name,
   description,
 }) {
-  if (!durationSeconds) {
-    throw new Error("create_for_distance_workout needs durationSeconds.");
+  if (!(durationSeconds > 0)) {
+    throw new Error("create_for_distance_workout needs a positive durationSeconds.");
+  }
+  if (!isPositiveInt(sets)) {
+    throw new Error(`create_for_distance_workout: sets must be a positive integer (got ${sets}).`);
   }
   if (rpe != null && (rpe < 6 || rpe > 20)) {
     throw new Error(`rpe must be on BTWB's Borg scale, 6-20 (got ${rpe}).`);
@@ -1117,8 +1149,8 @@ export async function createIntervalsWorkout({
   name,
   description,
 }) {
-  if (!intervals || !distance) {
-    throw new Error("create_intervals_workout needs intervals and distance.");
+  if (!isPositiveInt(intervals) || !(distance > 0)) {
+    throw new Error("create_intervals_workout needs a positive integer intervals and a positive distance.");
   }
   const UNITS = ["m", "km", "ft", "yd", "mi", "in"];
   if (!UNITS.includes(distanceUnit)) {
@@ -1157,10 +1189,6 @@ export async function createIntervalsWorkout({
   });
 }
 
-// Defines an AMRAP - as many rounds as possible of the given movements in a
-// fixed time. Scored on total rounds, which is the scoring type none of the
-// log_* tools handle yet. Movement `reps` are optional: BTWB omits the key
-// entirely when a movement has no prescribed reps.
 // One movement inside a metcon round. BTWB carries each prescribed measure as a
 // separate top-level {value, unit} key - `reps` for counted work, `distance` for
 // carries and monostructural pieces, `weight` for loaded movements - and a
@@ -1191,7 +1219,15 @@ function metconMovement({
   };
 }
 
+// Defines an AMRAP - as many rounds as possible of the given movements in a
+// fixed time. Scored on total rounds, which is the scoring type none of the
+// log_* tools handle yet. Movement `reps` are optional: BTWB omits the key
+// entirely when a movement has no prescribed reps.
 export async function createAmrapWorkout({ minutes, movements, name, description }) {
+  if (!(minutes > 0)) {
+    throw new Error(`create_amrap_workout needs positive minutes (got ${minutes}).`);
+  }
+  requireMovements("create_amrap_workout", movements);
   const contents = movements.map((m) => metconMovement(m));
 
   return saveWorkoutDefinition({
@@ -1208,10 +1244,6 @@ export async function createAmrapWorkout({ minutes, movements, name, description
   });
 }
 
-// Loads a workout's "Plan" form - the page behind the Plan button on any
-// workout - and returns what's needed to post it back: the form's own CSRF
-// token, the pre-generated group name, and the tracks the member can schedule
-// onto.
 // For time - one round, or N rounds of the same movements ("3 RFT: 9 Power
 // Cleans, 9 Ring Dips, 12 Box Jumps").
 //
@@ -1227,6 +1259,10 @@ export async function createForTimeWorkout({
   name,
   description,
 }) {
+  if (!isPositiveInt(rounds)) {
+    throw new Error(`create_for_time_workout: rounds must be a positive integer (got ${rounds}).`);
+  }
+  requireMovements("create_for_time_workout", movements);
   const round = movements.map((m) => metconMovement(m));
   const contents = Array.from({ length: rounds }, () => round).flat();
 
@@ -1239,8 +1275,12 @@ export async function createForTimeWorkout({
   });
 }
 
+// Loads a workout's "Plan" form - the page behind the Plan button on any
+// workout - and returns what's needed to post it back: the form's own CSRF
+// token, the pre-generated group name, and the tracks the member can schedule
+// onto.
 async function loadPlanForm(workoutId) {
-  const html = await fetchPageHtml(`/plan/track_events/workouts/${workoutId}/new`);
+  const html = await fetchHtml(`/plan/track_events/workouts/${workoutId}/new`);
 
   // The form is server-rendered but its authenticity_token input is NOT -
   // Rails/Turbo injects that client-side from the csrf-token meta tag ON THIS
@@ -1290,6 +1330,13 @@ export async function getTracks({ workoutId = 2 } = {}) {
 // Pass the same groupName for several workouts on one date to group them into
 // a single session block; omit it and each gets BTWB's own random group.
 export async function scheduleWorkout({ workoutId, trackId, date, title = "", groupName }) {
+  if (!Number.isInteger(workoutId) || workoutId <= 0) {
+    throw new Error(`schedule_workout needs a positive integer workoutId (got ${workoutId}).`);
+  }
+  // A malformed date comes back as a 422 that looks just like a CSRF failure.
+  if (!isValidIsoDate(date)) {
+    throw new Error(`schedule_workout: date must be a real YYYY-MM-DD date (got "${date}").`);
+  }
   const form = await loadPlanForm(workoutId);
 
   if (!trackId) {
@@ -1319,19 +1366,12 @@ export async function scheduleWorkout({ workoutId, trackId, date, title = "", gr
     "track_event[group_name]": groupName || form.groupName,
   });
 
-  const res = await fetch(`${BASE_URL}/plan/track_events/workouts`, {
-    method: "POST",
-    headers: {
-      Cookie: cachedCookie,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "X-CSRF-Token": form.csrfToken,
-    },
-    body,
-    redirect: "manual",
+  const { res, body: text } = await sendWrite(`${BASE_URL}/plan/track_events/workouts`, {
+    csrfToken: form.csrfToken,
+    form: body,
   });
 
   if (![302, 303].includes(res.status)) {
-    const text = await res.text().catch(() => "");
     throw new Error(`BTWB schedule_workout failed: HTTP ${res.status}. ${text.slice(0, 300)}`);
   }
 
@@ -1352,14 +1392,16 @@ export async function scheduleWorkout({ workoutId, trackId, date, title = "", gr
 // which live in BTWB's shared library and can't be deleted - a track event
 // belongs to the member, so this is the undo for schedule_workout.
 export async function deleteTrackEvent(trackEventId) {
+  if (!Number.isInteger(trackEventId) || trackEventId <= 0) {
+    throw new Error(`delete_track_event needs a positive integer id (got ${trackEventId}).`);
+  }
   const csrfToken = await getCsrfToken();
-  const res = await fetch(`${BASE_URL}/plan/track_events/${trackEventId}`, {
+  const { res, body: text } = await sendWrite(`${BASE_URL}/plan/track_events/${trackEventId}`, {
     method: "DELETE",
-    headers: { Cookie: cachedCookie, "X-CSRF-Token": csrfToken, Accept: "text/html" },
-    redirect: "manual",
+    csrfToken,
+    headers: { Accept: "text/html" },
   });
   if (![200, 204, 302, 303].includes(res.status)) {
-    const text = await res.text().catch(() => "");
     throw new Error(
       `BTWB delete_track_event failed: HTTP ${res.status}. ${text.slice(0, 300)}`
     );
