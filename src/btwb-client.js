@@ -472,7 +472,14 @@ export async function getTrackEvents({ date, track } = {}) {
     trackNames[key] = decodeHtmlEntities(name);
   }
 
-  const dayStart = html.indexOf(`whiteboard/day?d=${date}"`);
+  // Anchor on the day box's own link, the one wrapping <h3 class="view-day">.
+  // The header's Day/Week/Month toggle also links to whiteboard/day?d=<today>,
+  // so a bare indexOf matched the header whenever `date` was today, and the
+  // slice up to the first box held no events (getTrackEvents returned []).
+  const escapedDate = String(date).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const dayStart = html.search(
+    new RegExp(`whiteboard/day\\?d=${escapedDate}"\\s*>\\s*<h3 class="view-day"`)
+  );
   if (dayStart < 0) {
     throw new Error(`No ${date} box found on the BTWB whiteboard calendar.`);
   }
