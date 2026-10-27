@@ -14,6 +14,7 @@ import {
   getTrackEvents,
   logSetsWorkout,
   logForTimeWorkout,
+  logAmrapWorkout,
   getMovementHistory,
   createSetsWorkout,
   createAmrapWorkout,
@@ -540,7 +541,7 @@ const TOOLS = [
   {
     name: "log_sets_workout",
     description:
-      "Log a set-by-set lifting result (a weightlifting/sets workout such as a class " +
+      "Log a set-by-set lifting result (a weightlifting/sets or single/emom workout such as a class " +
       "track's 'Bench Press : 3 @ 80%, ... 2 @ 85%') against that specific prescribed " +
       "workout - one actual weight per prescribed set, in order - optionally linked " +
       "to a track event. The performed date can differ from the track event's date " +
@@ -571,6 +572,37 @@ const TOOLS = [
         trackEventId: { type: "number", description: "Optional track_event ID to link the result to (from get_track_events)" },
       },
       required: ["workoutId", "workoutSlug", "sets", "performedDate"],
+    },
+  },
+  {
+    name: "log_amrap_workout",
+    description:
+      "Log a finished AMRAP result (completed rounds + extra reps) against that " +
+      "specific prescribed AMRAP workout, optionally linked to a track event. " +
+      "`loads` overrides a movement's load by position for a scaled result. " +
+      "Use get_track_events to find workoutId/workoutSlug/trackEventId. Every entry " +
+      "is always posted with Privacy: Only Me - hardcoded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        rounds: { type: "number", description: "Completed full rounds" },
+        extraReps: { type: "number", description: "Reps into the unfinished round", default: 0 },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        loads: {
+          type: "array",
+          description: "Optional per-item load overrides by position; null keeps prescribed",
+          items: {
+            type: ["object", "null"],
+            properties: { weight: { type: "number" }, weightUnit: { type: "string", enum: ["lbs", "kg"] } },
+          },
+        },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "rounds", "performedDate"],
     },
   },
   {
@@ -769,6 +801,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "log_sets_workout":
         result = await logSetsWorkout(args);
+        break;
+      case "log_amrap_workout":
+        result = await logAmrapWorkout(args);
         break;
       case "log_for_time_workout":
         result = await logForTimeWorkout(args);
