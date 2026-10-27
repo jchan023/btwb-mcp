@@ -611,9 +611,9 @@ export async function logSetsWorkout({
 }) {
   const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
   const prescription = workout.prescription || {};
-  if (prescription.type !== "weightlifting/sets") {
+  if (!["weightlifting/sets", "single/emom"].includes(prescription.type)) {
     throw new Error(
-      `log_sets_workout only handles weightlifting/sets workouts; this one is "${prescription.type}".`
+      `log_sets_workout only handles weightlifting/sets and single/emom workouts; this one is "${prescription.type}".`
     );
   }
   const prescribedSets = (workout.contents || []).filter((c) => c.type === "movement");
@@ -714,6 +714,75 @@ export async function logForTimeWorkout({
 
   return postPrescribedSession({
     toolName: "log_for_time_workout",
+    workoutId,
+    workoutSlug,
+    csrfToken,
+    uiobject,
+    performedDate,
+    rxd,
+    notes,
+    trackEventId,
+  });
+}
+
+// Logs a finished AMRAP result (rounds + extra reps) against a specific
+// prescribed AMRAP workout, optionally linked to a track event. Movements and
+// reps come from the prescription; `loads` optionally overrides a movement's
+// load by position for a scaled result. Mirrors the prescription's own
+// scoring (totalRounds) - only workouts whose Log page loads are supported.
+export async function logAmrapWorkout({
+  workoutId,
+  workoutSlug,
+  rounds,
+  extraReps = 0,
+  performedDate,
+  rxd = true,
+  loads = [],
+  notes = "",
+  trackEventId,
+}) {
+  const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  const prescription = workout.prescription || {};
+  if (!/^amrap/.test(prescription.type || "")) {
+    throw new Error(`log_amrap_workout only handles AMRAP workouts; this one is "${prescription.type}".`);
+  }
+  // BTWB records the unfinished round as per-movement "partials", filled in
+  // prescription order; the score is rounds + the mean fraction of each
+  // movement's prescribed reps completed (what its own logger computes).
+  let repsLeft = extraReps;
+  let fractionSum = 0;
+  let movementCount = 0;
+  const contents = (workout.contents || []).map((item, i) => {
+    if (item.type !== "movement") return item;
+    const load = loads[i];
+    const prescribed = item.reps?.value;
+    const done = prescribed ? Math.min(repsLeft, prescribed) : 0;
+    repsLeft -= done;
+    movementCount += 1;
+    if (prescribed) fractionSum += done / prescribed;
+    return {
+      ...item,
+      ...(load ? { weight: { value: load.weight, unit: load.weightUnit || "lbs" } } : {}),
+      partials: { reps: done },
+    };
+  });
+  if (repsLeft > 0) {
+    throw new Error(`extraReps ${extraReps} is more than one full round of this workout.`);
+  }
+  const totalRounds = rounds + (movementCount ? fractionSum / movementCount : 0);
+  const uiobject = {
+    type: "workoutSession",
+    execution: {
+      type: prescription.type,
+      ...(prescription.time ? { time: prescription.time } : {}),
+      inputs: { rounds },
+      scoring: prescription.scoring || "totalRounds",
+      result: { totalRounds },
+    },
+    contents,
+  };
+  return postPrescribedSession({
+    toolName: "log_amrap_workout",
     workoutId,
     workoutSlug,
     csrfToken,
