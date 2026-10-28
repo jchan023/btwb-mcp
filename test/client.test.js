@@ -155,3 +155,29 @@ describe("credentials", () => {
     await assert.rejects(client.getMemberId(), /No BTWB session cookie found/);
   });
 });
+
+describe("fetchHtml errors", () => {
+  it("include the response body for a 5xx", async () => {
+    installFakeBtwb((req) =>
+      req.pathname === "/workouts/1-x/workout_sessions/new"
+        ? reply("<h1>We're sorry,\n  something went wrong.</h1>", { status: 500 })
+        : undefined
+    );
+    const client = await freshClient();
+
+    await assert.rejects(
+      client.logAmrapWorkout({ workoutId: 1, workoutSlug: "x", rounds: 1, performedDate: "2026-10-28" }),
+      /HTTP 500\. <h1>We're sorry, something went wrong\.<\/h1>/
+    );
+  });
+
+  it("leave a 4xx as just the status", async () => {
+    installFakeBtwb();
+    const client = await freshClient();
+
+    await assert.rejects(
+      client.logAmrapWorkout({ workoutId: 1, workoutSlug: "x", rounds: 1, performedDate: "2026-10-28" }),
+      (err) => /HTTP 404$/.test(err.message)
+    );
+  });
+});
