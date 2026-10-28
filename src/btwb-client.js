@@ -254,7 +254,14 @@ async function fetchHtml(path) {
   const { res, body } = await authedFetch(`${BASE_URL}${path}`, {
     signedOut: (html) => !CSRF_META.test(html),
   });
-  if (!res.ok) throw new Error(`BTWB fetch of ${path} failed: HTTP ${res.status}`);
+  if (!res.ok) {
+    // A 5xx page often says why (BTWB's own error page); keep a short, one-line
+    // excerpt so the failure isn't just a status code.
+    const detail = res.status >= 500 ? body.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+    throw new Error(
+      `BTWB fetch of ${path} failed: HTTP ${res.status}` + (detail ? `. ${detail}` : "")
+    );
+  }
   return body;
 }
 
