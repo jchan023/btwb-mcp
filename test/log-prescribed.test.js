@@ -71,3 +71,39 @@ describe("logSetsWorkout", () => {
     assert.deepEqual(ui.contents.map((c) => c.inputs.weight.value), [165, 175]);
   });
 });
+
+describe("complex EMOM and rounds-for-time", () => {
+  it("logs a totalWeight EMOM of complex items with the summed weight", async () => {
+    const items = [1, 2].map(() => ({ type: "complex", reps: { value: 1, unit: "reps" }, movements: [] }));
+    const { calls } = installFakeBtwb(
+      withPage(logPage({ type: "single/emom", scoring: "totalWeight" }, items))
+    );
+    const client = await freshClient();
+
+    await client.logSetsWorkout({
+      workoutId: 1, workoutSlug: "emom", sets: [{ weight: 65 }, { weight: 75 }], performedDate: "2026-10-29",
+    });
+
+    const ui = postedUiobject(calls);
+    assert.deepEqual(ui.execution.result.totalWeight, { value: 140, unit: "lbs" });
+    assert.deepEqual(ui.contents.map((c) => c.inputs.weight.value), [65, 75]);
+  });
+
+  it("logs a roundsForTime workout with its rounds and a load override", async () => {
+    const items = [
+      { type: "movement", movementName: "Hang Power Snatch", reps: { value: 8, unit: "reps" }, weight: { value: 95, unit: "lbs" } },
+      { type: "movement", movementName: "Double Under", reps: { value: 48, unit: "reps" } },
+    ];
+    const { calls } = installFakeBtwb(withPage(logPage({ type: "roundsForTime", rounds: 4 }, items)));
+    const client = await freshClient();
+
+    await client.logForTimeWorkout({
+      workoutId: 1, workoutSlug: "rft", totalTimeSeconds: 988, performedDate: "2026-10-29", rxd: false, loads: [{ weight: 75 }],
+    });
+
+    const ui = postedUiobject(calls);
+    assert.equal(ui.execution.rounds, 4);
+    assert.equal(ui.execution.result.totalTime.value, 988);
+    assert.equal(ui.contents[0].weight.value, 75);
+  });
+});
