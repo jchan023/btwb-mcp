@@ -623,7 +623,9 @@ export async function logSetsWorkout({
       `log_sets_workout only handles weightlifting/sets and single/emom workouts; this one is "${prescription.type}".`
     );
   }
-  const prescribedSets = (workout.contents || []).filter((c) => c.type === "movement");
+  const prescribedSets = (workout.contents || []).filter(
+    (c) => c.type === "movement" || c.type === "complex"
+  );
   if (prescribedSets.length !== sets.length) {
     throw new Error(
       `This workout prescribes ${prescribedSets.length} sets but ${sets.length} were given - ` +
@@ -642,9 +644,26 @@ export async function logSetsWorkout({
   });
 
   const { type, ...executionFields } = prescription;
+  const scoring = prescription.scoring || "completed";
+  // An EMOM scored by total weight stores the sum of weight x reps (each
+  // prescribed item's own reps, 1 when unstated), as BTWB's own logger does.
+  const totalWeight =
+    scoring === "totalWeight"
+      ? {
+          result: {
+            totalWeight: {
+              value: contents.reduce(
+                (sum, c) => sum + c.inputs.weight.value * (c.reps?.value ?? 1),
+                0
+              ),
+              unit: sets[0].weightUnit || "lbs",
+            },
+          },
+        }
+      : {};
   const uiobject = {
     type: "workoutSession",
-    execution: { type, ...executionFields, scoring: prescription.scoring || "completed" },
+    execution: { type, ...executionFields, scoring, ...totalWeight },
     contents,
   };
 
@@ -681,9 +700,9 @@ export async function logForTimeWorkout({
 }) {
   const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
   const prescription = workout.prescription || {};
-  if (!/^forTime/.test(prescription.type || "")) {
+  if (!/^(forTime|roundsForTime)/.test(prescription.type || "")) {
     throw new Error(
-      `log_for_time_workout only handles For Time workouts; this one is "${prescription.type}".`
+      `log_for_time_workout only handles For Time and Rounds For Time workouts; this one is "${prescription.type}".`
     );
   }
   const capSeconds = prescription.timeCap?.time?.value;
@@ -711,6 +730,7 @@ export async function logForTimeWorkout({
     type: "workoutSession",
     execution: {
       type: prescription.type,
+      ...(prescription.rounds ? { rounds: prescription.rounds } : {}),
       ...(prescription.timeCap ? { timeCap: prescription.timeCap } : {}),
       inputs: { time },
       scoring: "totalTime",
