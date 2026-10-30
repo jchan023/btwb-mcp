@@ -15,6 +15,7 @@ import {
   logSetsWorkout,
   logForTimeWorkout,
   logAmrapWorkout,
+  logTimedRoundsWorkout,
   getMovementHistory,
   createSetsWorkout,
   createAmrapWorkout,
@@ -606,6 +607,34 @@ const TOOLS = [
     },
   },
   {
+    name: "log_timed_rounds_workout",
+    description:
+      "Log a timed-rounds, max-reps result (e.g. a class RemReps piece like '5 x 1 min: " +
+      "10 Burpees and max Echo Bike Calories') against that specific prescribed workout, " +
+      "optionally linked to a track event. `roundScores` is the max-rep score for each " +
+      "round in order (e.g. calories per round); BTWB totals them. Fixed-rep movements " +
+      "stay as prescribed, so put any difference in `notes`. Use get_track_events to find " +
+      "workoutId/workoutSlug/trackEventId. Every entry is always posted with Privacy: " +
+      "Only Me - hardcoded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        roundScores: {
+          type: "array",
+          description: "One max-rep score per round, in order (e.g. calories per round)",
+          items: { type: "number" },
+        },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "roundScores", "performedDate"],
+    },
+  },
+  {
     name: "log_for_time_workout",
     description:
       "Log a finished For Time result (with or without a time cap) against that " +
@@ -804,6 +833,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "log_amrap_workout":
         result = await logAmrapWorkout(args);
+        break;
+      case "log_timed_rounds_workout":
+        result = await logTimedRoundsWorkout(args);
         break;
       case "log_for_time_workout":
         result = await logForTimeWorkout(args);

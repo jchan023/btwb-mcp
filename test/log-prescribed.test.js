@@ -107,3 +107,51 @@ describe("complex EMOM and rounds-for-time", () => {
     assert.equal(ui.contents[0].weight.value, 75);
   });
 });
+
+describe("logTimedRoundsWorkout", () => {
+  const remReps = [
+    {
+      type: "section",
+      rounds: 5,
+      time: { value: 60, unit: "seconds" },
+      contents: [
+        { type: "movement", movementName: "Burpee", movementId: 24, reps: { value: 6, unit: "reps" } },
+        { type: "movement", movementName: "Echo Bike Calorie", movementId: 19875, reps: { value: 0, unit: "maxreps" } },
+        { type: "rest", time: { value: 60, unit: "seconds" } },
+      ],
+    },
+  ];
+  const timedRounds = { type: "timedRounds/maxReps", scoring: "totalReps" };
+  const args = { workoutId: 19560137, workoutSlug: "remreps", performedDate: "2026-10-30" };
+
+  it("scores the max-rep movement per round, totals them, and posts privately", async () => {
+    const { calls } = installFakeBtwb(withPage(logPage(timedRounds, remReps)));
+    const client = await freshClient();
+
+    await client.logTimedRoundsWorkout({ ...args, roundScores: [11, 9, 9, 8, 11], rxd: false });
+
+    const ui = postedUiobject(calls);
+    assert.equal(ui.execution.type, "timedRounds/maxReps");
+    assert.equal(ui.execution.scoring, "totalReps");
+    assert.equal(ui.execution.result.totalReps, 48);
+    const [section] = ui.contents;
+    assert.equal(section.rounds, 5);
+    assert.deepEqual(section.contents[1].scores, [11, 9, 9, 8, 11]);
+    assert.equal(section.contents[0].scores, undefined);
+    assert.equal(section.contents[2].type, "rest");
+    const form = new URLSearchParams(writes(calls)[0].body);
+    assert.equal(form.get("workout_session[privacy]"), "onlyme");
+    assert.equal(form.get("workout_session[rxd]"), "false");
+  });
+
+  it("rejects the wrong number of scores, bad scores and other workout types", async () => {
+    const attempt = async (prescription, roundScores) => {
+      installFakeBtwb(withPage(logPage(prescription, remReps)));
+      const client = await freshClient();
+      return client.logTimedRoundsWorkout({ ...args, roundScores });
+    };
+    await assert.rejects(attempt(timedRounds, [11, 9]), /one score per round \(5\)/);
+    await assert.rejects(attempt(timedRounds, [11, 9, 9, 8, -1]), /0 or more/);
+    await assert.rejects(attempt({ type: "amrap" }, [1, 1, 1, 1, 1]), /only handles timedRounds\/maxReps/);
+  });
+});

@@ -821,6 +821,71 @@ export async function logAmrapWorkout({
   });
 }
 
+// Logs a timed-rounds, max-reps result (e.g. "5 x 1 min RemReps: 10 Burpees and
+// max Echo Bike Calories") against a specific prescribed workout. BTWB scores it
+// as totalReps: the one max-rep movement (the bike calories) carries a `scores`
+// array with one number per round, and the fixed-rep movements are left as
+// prescribed. Same shape BTWB's own timedRounds/maxReps logger posts. Only
+// single-section workouts with one max-rep movement are supported.
+export async function logTimedRoundsWorkout({
+  workoutId,
+  workoutSlug,
+  roundScores,
+  performedDate,
+  rxd = true,
+  notes = "",
+  trackEventId,
+}) {
+  const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  const prescription = workout.prescription || {};
+  if (prescription.type !== "timedRounds/maxReps") {
+    throw new Error(
+      `log_timed_rounds_workout only handles timedRounds/maxReps workouts; this one is "${prescription.type}".`
+    );
+  }
+  const sections = workout.contents || [];
+  if (sections.length !== 1 || sections[0].type !== "section") {
+    throw new Error("log_timed_rounds_workout only supports workouts with a single section of rounds.");
+  }
+  const [section] = sections;
+  const isMaxReps = (item) => item.type === "movement" && item.reps?.unit === "maxreps";
+  if ((section.contents || []).filter(isMaxReps).length !== 1) {
+    throw new Error("log_timed_rounds_workout needs exactly one max-rep movement per round.");
+  }
+  if (!Array.isArray(roundScores) || roundScores.length !== section.rounds) {
+    throw new Error(`roundScores needs one score per round (${section.rounds}); got ${roundScores?.length ?? 0}.`);
+  }
+  if (!roundScores.every((score) => Number.isFinite(score) && score >= 0)) {
+    throw new Error("Every round score must be a number of 0 or more.");
+  }
+
+  const uiobject = {
+    type: "workoutSession",
+    execution: {
+      type: prescription.type,
+      scoring: "totalReps",
+      result: { totalReps: roundScores.reduce((sum, score) => sum + score, 0) },
+    },
+    contents: [
+      {
+        ...section,
+        contents: section.contents.map((item) => (isMaxReps(item) ? { ...item, scores: roundScores } : item)),
+      },
+    ],
+  };
+  return postPrescribedSession({
+    toolName: "log_timed_rounds_workout",
+    workoutId,
+    workoutSlug,
+    csrfToken,
+    uiobject,
+    performedDate,
+    rxd,
+    notes,
+    trackEventId,
+  });
+}
+
 // Logs a body-weight entry to BTWB's Weigh-Ins tracker (/members/{id}/weigh_ins),
 // the same POST its "New Weigh In" form makes - a separate feature from the
 // "Weigh In" movement, which would go through logWorkout instead. Unlike the
