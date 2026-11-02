@@ -54,6 +54,19 @@ describe("logAmrapWorkout", () => {
       /only handles AMRAP/
     );
   });
+
+  it("rejects an unverified amrap-prefixed sibling type instead of treating it as a plain amrap", async () => {
+    // Regression guard: this must stay an exact match on "amrap", not a
+    // prefix test - BTWB's prescriptionType taxonomy has amrapBuyIn,
+    // amrapMaxRep and amrapRepeats alongside plain "amrap" (issue #7), none
+    // of which have been verified to share its structure.
+    installFakeBtwb(withPage(logPage({ type: "amrapBuyIn" }, cindy)));
+    const client = await freshClient();
+    await assert.rejects(
+      client.logAmrapWorkout({ workoutId: 2, workoutSlug: "cindy", rounds: 1, performedDate: "2026-10-26" }),
+      /only handles AMRAP.*"amrapBuyIn"/
+    );
+  });
 });
 
 describe("logSetsWorkout", () => {
@@ -105,6 +118,54 @@ describe("complex EMOM and rounds-for-time", () => {
     assert.equal(ui.execution.rounds, 4);
     assert.equal(ui.execution.result.totalTime.value, 988);
     assert.equal(ui.contents[0].weight.value, 75);
+  });
+
+  it("rejects an unverified forTime-prefixed sibling type instead of treating it as a plain For Time", async () => {
+    // Regression guard: this must stay an exact match on "forTime"/
+    // "roundsForTime", not a prefix test - BTWB's prescriptionType taxonomy
+    // has rftVaryingReps alongside them (issue #7), an RFT whose rep scheme
+    // varies by round (e.g. 21-15-9), which has not been verified to share
+    // the fixed-rep structure logForTimeWorkout assumes.
+    installFakeBtwb(withPage(logPage({ type: "rftVaryingReps" }, [])));
+    const client = await freshClient();
+    await assert.rejects(
+      client.logForTimeWorkout({ workoutId: 1, workoutSlug: "rft", totalTimeSeconds: 988, performedDate: "2026-10-29" }),
+      /only handles For Time and Rounds For Time.*"rftVaryingReps"/
+    );
+  });
+});
+
+describe("getWorkoutPrescription", () => {
+  it("returns the raw prescription and contents without posting anything", async () => {
+    const { calls } = installFakeBtwb(withPage(logPage(amrap, cindy)));
+    const client = await freshClient();
+
+    const result = await client.getWorkoutPrescription({
+      workoutId: 2, workoutSlug: "cindy", performedDate: "2026-10-26",
+    });
+
+    assert.equal(result.prescriptionType, "amrap");
+    assert.equal(result.scoring, "totalRounds");
+    assert.deepEqual(result.prescription, amrap);
+    assert.deepEqual(result.contents, cindy);
+    assert.equal(writes(calls).length, 0);
+  });
+
+  it("surfaces an ascending-ladder prescription as-is, untyped by any logger", async () => {
+    const ascending = { type: "amreps/ascending", time: { value: 480, unit: "seconds" }, scoring: "rounds+reps" };
+    const ladder = [
+      { type: "movement", movementName: "Dumbbell Snatch", movementId: 7, reps: { value: null, unit: "ladder" } },
+      { type: "movement", movementName: "Lateral Burpee Over Dumbbell", movementId: 24, reps: { value: null, unit: "ladder" } },
+    ];
+    installFakeBtwb(withPage(logPage(ascending, ladder)));
+    const client = await freshClient();
+
+    const result = await client.getWorkoutPrescription({
+      workoutId: 19585971, workoutSlug: "cheat-code", performedDate: "2026-11-02",
+    });
+
+    assert.equal(result.prescriptionType, "amreps/ascending");
+    assert.deepEqual(result.contents, ladder);
   });
 });
 

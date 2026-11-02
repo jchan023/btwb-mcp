@@ -523,6 +523,65 @@ export async function getTrackEvents({ date, track } = {}) {
   return { date, events };
 }
 
+// ---------------------------------------------------------------------------
+// Known BTWB prescription types
+// ---------------------------------------------------------------------------
+// Every log_* function below checks `prescription.type` (as loaded by
+// loadPrescribedWorkout, below) before posting, and only accepts the exact
+// type string(s) it has actually been verified against - never a prefix or
+// substring match, so an unverified sibling type fails loudly with a clear
+// error instead of silently posting a structurally wrong result. (See
+// get_workout_prescription, a read-only lookup for inspecting a type's real
+// JSON shape before writing or extending a logger for it.)
+//
+// BTWB's own prescriptionType enum has 21 values, listed in the builder JS
+// bundle (assets/workouts/new-new-builder-*.js) and captured in
+// https://github.com/jchan023/btwb-mcp/issues/7. That bundle names them in
+// camelCase/hyphenated form; the actual wire-format `prescription.type`
+// string a workout's Log Result page sends back can differ (observed so far:
+// a hyphen before the last segment becomes "/", and the segment after it is
+// lowercased - e.g. "timedRounds-maxReps" -> "timedRounds/maxReps",
+// "amreps-ascending" -> "amreps/ascending" - but this has only been confirmed
+// for the handful of types actually hit live; treat it as a pattern to watch
+// for, not a dependable rule for types nobody has seen on the wire yet):
+//
+//   JS bundle name     -> Wire prescription.type -> Handled by
+//   weightliftingSets  -> weightlifting/sets     -> logSetsWorkout
+//   (not in the bundle;
+//    found live)       -> single/emom            -> logSetsWorkout
+//   forTime             -> forTime                -> logForTimeWorkout
+//   roundsForTime       -> roundsForTime          -> logForTimeWorkout
+//   bookends            -> bookends (assumed)     -> logRoundsWorkout (builds
+//     its own uiobject rather than reading one - see that function; only
+//     the totalTime/For-Time case is exercised)
+//   amrap               -> amrap                  -> logAmrapWorkout
+//   timedRounds-maxReps -> timedRounds/maxReps    -> logTimedRoundsWorkout
+//
+//   Confirmed type string, no logger yet:
+//   amreps-ascending -> amreps/ascending - hit live 11/2/2026 (an
+//     ascending-ladder AMRAP, e.g. a "2-4-6-8-10..." couplet, scored
+//     "Rounds + Reps" on its own Log Result page). Inspect it with
+//     get_workout_prescription before writing a logger for it.
+//
+//   In the bundle's taxonomy, wire format unconfirmed, no logger:
+//   alternating-emom, amrapBuyIn, amrapMaxRep, amrapRepeats, amreps (plain,
+//   non-ascending), deathby-reps, fgb ("Fight Gone Bad"-style), forQuality,
+//   multiple-emom, rftVaryingReps (an RFT whose rep scheme varies by round,
+//   e.g. 21-15-9), roundsForMaxReps, tabata, timeEachRound, twentyOne.
+//
+// Scoring values (7, from the same source): completed, totalDistance,
+// totalHeight, totalReps, totalRounds, totalTime, totalWeight. Only
+// completed, totalRounds, totalTime, totalReps and totalWeight are exercised
+// by the loggers above so far.
+//
+// DO NOT widen a type check to cover one of the "unconfirmed" rows above by
+// guessing its wire format or JSON shape. There's no BTWB sandbox (see
+// CONTRIBUTING.md) - the only safe way to add one is: hit it for real in a
+// live session, call get_workout_prescription on it, build a logger from
+// what that actually returns, and verify the write with a throwaway entry
+// (dated 2020-01-01, then deleted) before trusting it on real data.
+// ---------------------------------------------------------------------------
+
 // Loads a prescribed workout's own "Log Result" page for its CSRF token and
 // prescription (the `var uiobject` BTWB's logger is seeded with) - the
 // starting point for logging a result against that exact workout.
@@ -700,7 +759,14 @@ export async function logForTimeWorkout({
 }) {
   const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
   const prescription = workout.prescription || {};
-  if (!/^(forTime|roundsForTime)/.test(prescription.type || "")) {
+  // Exact match, not a prefix test: BTWB's own prescriptionType taxonomy (see
+  // the "Known BTWB prescription types" block below) has a "rftVaryingReps"
+  // type alongside plain "forTime"/"roundsForTime" - a prefix regex would
+  // silently also accept that (and anything else sharing the prefix) as if
+  // it were a fixed-rep For Time, which is untested and could post a
+  // structurally wrong result. Only these two exact strings have been
+  // verified against a live session.
+  if (!["forTime", "roundsForTime"].includes(prescription.type)) {
     throw new Error(
       `log_for_time_workout only handles For Time and Rounds For Time workouts; this one is "${prescription.type}".`
     );
@@ -770,7 +836,14 @@ export async function logAmrapWorkout({
 }) {
   const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
   const prescription = workout.prescription || {};
-  if (!/^amrap/.test(prescription.type || "")) {
+  // Exact match, not a prefix test: BTWB's own prescriptionType taxonomy (see
+  // "Known BTWB prescription types" below) has amrapBuyIn, amrapMaxRep and
+  // amrapRepeats alongside plain "amrap" - a prefix regex would also accept
+  // any of those (if their wire type starts with "amrap", unconfirmed) as a
+  // fixed, repeating-round AMRAP, which is a different structure (e.g. an
+  // upfront buy-in movement) and could silently post a wrong result instead
+  // of failing loudly. Only the exact string "amrap" has been verified.
+  if (prescription.type !== "amrap") {
     throw new Error(`log_amrap_workout only handles AMRAP workouts; this one is "${prescription.type}".`);
   }
   // BTWB records the unfinished round as per-movement "partials", filled in
@@ -819,6 +892,30 @@ export async function logAmrapWorkout({
     notes,
     trackEventId,
   });
+}
+
+// Reads a prescribed workout's own "Log Result" page and returns its raw
+// prescription JSON (the `var uiobject` BTWB's logger is seeded with) without
+// posting anything - a read-only way to see the exact shape BTWB uses for a
+// workout type before writing (or extending) a logger for it. This is how
+// every log_* function above was reverse-engineered in the first place; this
+// tool just exposes that same lookup directly instead of leaving it as a
+// private helper. Surfaced because log_amrap_workout only handles
+// prescription.type values starting with "amrap" - an ascending-ladder AMRAP
+// like "2-4-6-8-10... reps" (BTWB labels it "amreps/ascending", confirmed by
+// the error message when log_amrap_workout is pointed at one, and scores it
+// as "Rounds + Reps" per its own Log Result page) is not one of them, and no
+// logger here has been written for "amreps/ascending" yet because its real
+// prescription/result JSON shape hasn't been inspected against a live
+// session. Call this first, then open an issue/PR with what it returns.
+export async function getWorkoutPrescription({ workoutId, workoutSlug, performedDate }) {
+  const { workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  return {
+    prescriptionType: workout.prescription?.type,
+    scoring: workout.prescription?.scoring,
+    prescription: workout.prescription,
+    contents: workout.contents,
+  };
 }
 
 // Logs a timed-rounds, max-reps result (e.g. "5 x 1 min RemReps: 10 Burpees and
