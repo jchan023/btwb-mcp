@@ -821,6 +821,30 @@ export async function logAmrapWorkout({
   });
 }
 
+// Reads a prescribed workout's own "Log Result" page and returns its raw
+// prescription JSON (the `var uiobject` BTWB's logger is seeded with) without
+// posting anything - a read-only way to see the exact shape BTWB uses for a
+// workout type before writing (or extending) a logger for it. This is how
+// every log_* function above was reverse-engineered in the first place; this
+// tool just exposes that same lookup directly instead of leaving it as a
+// private helper. Surfaced because log_amrap_workout only handles
+// prescription.type values starting with "amrap" - an ascending-ladder AMRAP
+// like "2-4-6-8-10... reps" (BTWB labels it "amreps/ascending", confirmed by
+// the error message when log_amrap_workout is pointed at one, and scores it
+// as "Rounds + Reps" per its own Log Result page) is not one of them, and no
+// logger here has been written for "amreps/ascending" yet because its real
+// prescription/result JSON shape hasn't been inspected against a live
+// session. Call this first, then open an issue/PR with what it returns.
+export async function getWorkoutPrescription({ workoutId, workoutSlug, performedDate }) {
+  const { workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  return {
+    prescriptionType: workout.prescription?.type,
+    scoring: workout.prescription?.scoring,
+    prescription: workout.prescription,
+    contents: workout.contents,
+  };
+}
+
 // Logs a timed-rounds, max-reps result (e.g. "5 x 1 min RemReps: 10 Burpees and
 // max Echo Bike Calories") against a specific prescribed workout. BTWB scores it
 // as totalReps: the one max-rep movement (the bike calories) carries a `scores`

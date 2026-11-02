@@ -108,6 +108,40 @@ describe("complex EMOM and rounds-for-time", () => {
   });
 });
 
+describe("getWorkoutPrescription", () => {
+  it("returns the raw prescription and contents without posting anything", async () => {
+    const { calls } = installFakeBtwb(withPage(logPage(amrap, cindy)));
+    const client = await freshClient();
+
+    const result = await client.getWorkoutPrescription({
+      workoutId: 2, workoutSlug: "cindy", performedDate: "2026-10-26",
+    });
+
+    assert.equal(result.prescriptionType, "amrap");
+    assert.equal(result.scoring, "totalRounds");
+    assert.deepEqual(result.prescription, amrap);
+    assert.deepEqual(result.contents, cindy);
+    assert.equal(writes(calls).length, 0);
+  });
+
+  it("surfaces an ascending-ladder prescription as-is, untyped by any logger", async () => {
+    const ascending = { type: "amreps/ascending", time: { value: 480, unit: "seconds" }, scoring: "rounds+reps" };
+    const ladder = [
+      { type: "movement", movementName: "Dumbbell Snatch", movementId: 7, reps: { value: null, unit: "ladder" } },
+      { type: "movement", movementName: "Lateral Burpee Over Dumbbell", movementId: 24, reps: { value: null, unit: "ladder" } },
+    ];
+    installFakeBtwb(withPage(logPage(ascending, ladder)));
+    const client = await freshClient();
+
+    const result = await client.getWorkoutPrescription({
+      workoutId: 19585971, workoutSlug: "cheat-code", performedDate: "2026-11-02",
+    });
+
+    assert.equal(result.prescriptionType, "amreps/ascending");
+    assert.deepEqual(result.contents, ladder);
+  });
+});
+
 describe("logTimedRoundsWorkout", () => {
   const remReps = [
     {

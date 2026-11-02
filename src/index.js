@@ -16,6 +16,7 @@ import {
   logForTimeWorkout,
   logAmrapWorkout,
   logTimedRoundsWorkout,
+  getWorkoutPrescription,
   getMovementHistory,
   createSetsWorkout,
   createAmrapWorkout,
@@ -635,6 +636,29 @@ const TOOLS = [
     },
   },
   {
+    name: "get_workout_prescription",
+    description:
+      "Read-only: fetches a prescribed workout's own 'Log Result' page and returns its " +
+      "raw prescription JSON (prescriptionType, scoring, prescription, contents) without " +
+      "posting anything. Use this to see the exact shape BTWB uses for a workout type " +
+      "before writing or extending a log_* tool for it - this is how every existing " +
+      "log_* tool here was reverse-engineered. In particular, log_amrap_workout only " +
+      "handles prescription.type values starting with 'amrap'; an ascending-ladder AMRAP " +
+      "(e.g. a '2-4-6-8-10... reps' couplet, scored 'Rounds + Reps' on its own Log Result " +
+      "page) comes back as prescription.type 'amreps/ascending' instead, and there is no " +
+      "logger for that type yet - call this tool on one first, then use the result to " +
+      "write/extend a logger.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number", description: "Numeric workout ID (from get_track_events or the workout URL)" },
+        workoutSlug: { type: "string", description: "Workout URL slug (from get_track_events or the workout URL)" },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD (the Log Result page is date-scoped)" },
+      },
+      required: ["workoutId", "workoutSlug", "performedDate"],
+    },
+  },
+  {
     name: "log_for_time_workout",
     description:
       "Log a finished For Time result (with or without a time cap) against that " +
@@ -836,6 +860,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "log_timed_rounds_workout":
         result = await logTimedRoundsWorkout(args);
+        break;
+      case "get_workout_prescription":
+        result = await getWorkoutPrescription(args);
         break;
       case "log_for_time_workout":
         result = await logForTimeWorkout(args);
