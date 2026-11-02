@@ -33,9 +33,16 @@ This project calls BTWB's internal, undocumented endpoints rather than a publish
 - **`delete_workout_session(sessionId)`** - permanently deletes an already-logged result by its session ID. No undo.
 - **`refresh_session_cookie()`** - manually re-authenticates and replaces the stored session cookie. Every other tool already does this automatically on an expired session (see "Automatic cookie refresh" below) - this is mainly for testing your setup or forcing an early refresh.
 
-### Known gap: ascending-ladder AMRAPs ("amreps/ascending")
+### Known gaps: workout types with no logger yet
 
-`log_amrap_workout` only handles prescription types starting with `"amrap"` - a repeating round, same reps every time. An **ascending-ladder** AMRAP (e.g. a "2-4-6-8-10... reps" couplet, where each round's rep count climbs) comes back from BTWB as `prescription.type` **`"amreps/ascending"`** instead (confirmed live, from the error `log_amrap_workout` throws when pointed at one), and its own Log Result page scores it "Rounds + Reps" rather than BTWB's usual AMRAP scoring. There is no logger for this type yet, because its real prescription/result JSON shape hasn't been inspected against a live session. Use `get_workout_prescription` on one to see that shape, then add a `log_ascending_amrap_workout` (or extend `log_amrap_workout`) following the same pattern as the other `log_*` functions in `src/btwb-client.js` - and verify it with a real (then-deleted) throwaway entry before trusting it, same as any other write here (see Contributing).
+Every `log_*` tool above checks the real `prescription.type` BTWB sends back for that exact workout, and only accepts the type string(s) it's actually been verified against - a tight match, never a prefix or substring test, so an unverified sibling type fails with a clear error instead of silently posting something structurally wrong.
+
+BTWB's own `prescriptionType` enum has **21 values**, found in its builder JS bundle and captured in [issue #7](https://github.com/jchan023/btwb-mcp/issues/7). This project currently covers 6 of them - `weightlifting/sets`, `single/emom`, `forTime`, `roundsForTime`, `bookends`, `amrap`, `timedRounds/maxReps` (7 counting both sets tools) - each one added only after being hit for real in a live session and inspected. The rest:
+
+- **Confirmed on the wire, no logger yet: `amreps/ascending`** - an ascending-ladder AMRAP (e.g. a "2-4-6-8-10... reps" couplet, where each round's rep count climbs), scored "Rounds + Reps" on its own Log Result page rather than BTWB's usual AMRAP scoring. Hit live 11/2/2026 (the error `log_amrap_workout` throws when pointed at one names this type).
+- **In the taxonomy, wire format unconfirmed:** `alternating-emom`, `amrapBuyIn`, `amrapMaxRep`, `amrapRepeats`, `amreps` (plain, non-ascending), `deathby-reps`, `fgb`, `forQuality`, `multiple-emom`, `rftVaryingReps`, `roundsForMaxReps`, `tabata`, `timeEachRound`, `twentyOne`.
+
+Use **`get_workout_prescription(workoutId, workoutSlug, performedDate)`** on a real workout of one of these types to see its exact prescription JSON (read-only, posts nothing), then add a logger for it following the pattern of the existing `log_*` functions in `src/btwb-client.js` - see the "Known BTWB prescription types" comment block there for the full picture, including the hyphen-to-slash pattern observed so far between the JS bundle's names and the actual wire format. As with any other write here, verify it against a real (then-deleted) throwaway entry before trusting it - there's no BTWB sandbox to test against instead (see Contributing).
 
 ## Setup
 

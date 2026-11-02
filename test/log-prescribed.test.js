@@ -54,6 +54,19 @@ describe("logAmrapWorkout", () => {
       /only handles AMRAP/
     );
   });
+
+  it("rejects an unverified amrap-prefixed sibling type instead of treating it as a plain amrap", async () => {
+    // Regression guard: this must stay an exact match on "amrap", not a
+    // prefix test - BTWB's prescriptionType taxonomy has amrapBuyIn,
+    // amrapMaxRep and amrapRepeats alongside plain "amrap" (issue #7), none
+    // of which have been verified to share its structure.
+    installFakeBtwb(withPage(logPage({ type: "amrapBuyIn" }, cindy)));
+    const client = await freshClient();
+    await assert.rejects(
+      client.logAmrapWorkout({ workoutId: 2, workoutSlug: "cindy", rounds: 1, performedDate: "2026-10-26" }),
+      /only handles AMRAP.*"amrapBuyIn"/
+    );
+  });
 });
 
 describe("logSetsWorkout", () => {
@@ -105,6 +118,20 @@ describe("complex EMOM and rounds-for-time", () => {
     assert.equal(ui.execution.rounds, 4);
     assert.equal(ui.execution.result.totalTime.value, 988);
     assert.equal(ui.contents[0].weight.value, 75);
+  });
+
+  it("rejects an unverified forTime-prefixed sibling type instead of treating it as a plain For Time", async () => {
+    // Regression guard: this must stay an exact match on "forTime"/
+    // "roundsForTime", not a prefix test - BTWB's prescriptionType taxonomy
+    // has rftVaryingReps alongside them (issue #7), an RFT whose rep scheme
+    // varies by round (e.g. 21-15-9), which has not been verified to share
+    // the fixed-rep structure logForTimeWorkout assumes.
+    installFakeBtwb(withPage(logPage({ type: "rftVaryingReps" }, [])));
+    const client = await freshClient();
+    await assert.rejects(
+      client.logForTimeWorkout({ workoutId: 1, workoutSlug: "rft", totalTimeSeconds: 988, performedDate: "2026-10-29" }),
+      /only handles For Time and Rounds For Time.*"rftVaryingReps"/
+    );
   });
 });
 
