@@ -15,6 +15,10 @@ import {
   logSetsWorkout,
   logForTimeWorkout,
   logAmrapWorkout,
+  logAscendingAmrepsWorkout,
+  logTimeEachRoundWorkout,
+  logEffortSetsWorkout,
+  logRoundsMaxRepsWorkout,
   logTimedRoundsWorkout,
   getWorkoutPrescription,
   getMovementHistory,
@@ -608,6 +612,148 @@ const TOOLS = [
     },
   },
   {
+    name: "log_ascending_amreps_workout",
+    description:
+      "Log a finished ascending-ladder AMRAP (an 'AMReps 2-4-6-8-10...' workout, BTWB type " +
+      "amreps/ascending, scored in total reps) against that specific prescribed workout, " +
+      "optionally linked to a track event. `rounds` is the number of COMPLETED rounds " +
+      "(round 1 = start reps of each movement, round 2 = start + step, ...); `extraReps` " +
+      "is the reps done in the unfinished round, filled across the movements in " +
+      "prescription order. Returns the total reps BTWB stores. `loads` overrides a " +
+      "movement's load by position for a scaled result. Use get_track_events to find " +
+      "workoutId/workoutSlug/trackEventId. Every entry is always posted with Privacy: " +
+      "Only Me - hardcoded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        rounds: { type: "number", description: "Completed full rounds" },
+        extraReps: { type: "number", description: "Reps into the unfinished round", default: 0 },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        loads: {
+          type: "array",
+          description: "Optional per-item load overrides by position; null keeps prescribed",
+          items: {
+            type: ["object", "null"],
+            properties: { weight: { type: "number" }, weightUnit: { type: "string", enum: ["lbs", "kg"] } },
+          },
+        },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "rounds", "performedDate"],
+    },
+  },
+  {
+    name: "log_time_each_round_workout",
+    description:
+      "Log a timeEachRound result (e.g. '3x RFT: Dumbbell Bench Press, Devil Press, Wall Walks' " +
+      "where every round is timed) against that specific prescribed workout, optionally linked " +
+      "to a track event. `roundTimesSeconds` is one time per round, in order (e.g. 4:05 -> 245); " +
+      "BTWB totals them. `loads` overrides a movement's load by position for a scaled result. " +
+      "Use get_track_events to find workoutId/workoutSlug/trackEventId. Every entry is always " +
+      "posted with Privacy: Only Me - hardcoded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        roundTimesSeconds: { type: "array", items: { type: "number" }, description: "One time in seconds per round, in order" },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        loads: {
+          type: "array",
+          description: "Optional per-item load overrides by position; null keeps prescribed",
+          items: {
+            type: ["object", "null"],
+            properties: { weight: { type: "number" }, weightUnit: { type: "string", enum: ["lbs", "kg"] } },
+          },
+        },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "roundTimesSeconds", "performedDate"],
+    },
+  },
+  {
+    name: "log_effort_sets_workout",
+    description:
+      "Log a gymnastics/sets result (e.g. 'Strict Ring Dips: 10x max rep', scored in total reps) " +
+      "or a monostructural/sets result (e.g. 'Row: 4x 1500 m, rest 2:30', scored in total time or " +
+      "distance) against that specific prescribed workout, optionally linked to a track event. " +
+      "`sets` has one entry per prescribed set, in order, each with whatever that set asks for: " +
+      "`reps`, `timeSeconds`, `distance` (+ optional `distanceUnit`) or `weight`. BTWB computes the " +
+      "total. Use get_workout_prescription to see which inputs a workout wants. Use " +
+      "get_track_events to find workoutId/workoutSlug/trackEventId. Every entry is always posted " +
+      "with Privacy: Only Me - hardcoded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        sets: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              reps: { type: "number" },
+              timeSeconds: { type: "number" },
+              distance: { type: "number" },
+              distanceUnit: { type: "string" },
+              weight: { type: "number" },
+              weightUnit: { type: "string", enum: ["lbs", "kg"] },
+            },
+          },
+        },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "sets", "performedDate"],
+    },
+  },
+  {
+    name: "log_rounds_max_reps_workout",
+    description:
+      "Log a roundsForMaxReps result (e.g. '5 RF-ME: Front Squats and Strict Pull-ups' - each " +
+      "round is some fixed work plus max reps of one movement) against that specific " +
+      "prescribed workout, optionally linked to a track event. `roundScores` has one entry per " +
+      "round: the max reps that round (a number when there is one max-rep movement, otherwise " +
+      "an array with one number per max-rep movement in prescription order). Pick-load " +
+      "movements need their weight in `loads` at that movement's position. BTWB totals the " +
+      "score. Use get_workout_prescription to see the movements. Use get_track_events to find " +
+      "workoutId/workoutSlug/trackEventId. Every entry is always posted with Privacy: Only Me - " +
+      "hardcoded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        roundScores: {
+          type: "array",
+          items: { anyOf: [{ type: "number" }, { type: "array", items: { type: "number" } }] },
+          description: "One entry per round: max reps (number), or an array of max reps per max-rep movement",
+        },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        loads: {
+          type: "array",
+          description: "Per-item loads by position (required for pick-load movements); null keeps prescribed",
+          items: {
+            type: ["object", "null"],
+            properties: { weight: { type: "number" }, weightUnit: { type: "string", enum: ["lbs", "kg"] } },
+          },
+        },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "roundScores", "performedDate"],
+    },
+  },
+  {
     name: "log_timed_rounds_workout",
     description:
       "Log a timed-rounds, max-reps result (e.g. a class RemReps piece like '5 x 1 min: " +
@@ -642,12 +788,10 @@ const TOOLS = [
       "raw prescription JSON (prescriptionType, scoring, prescription, contents) without " +
       "posting anything. Use this to see the exact shape BTWB uses for a workout type " +
       "before writing or extending a log_* tool for it - this is how every existing " +
-      "log_* tool here was reverse-engineered. In particular, log_amrap_workout only " +
-      "handles prescription.type values starting with 'amrap'; an ascending-ladder AMRAP " +
-      "(e.g. a '2-4-6-8-10... reps' couplet, scored 'Rounds + Reps' on its own Log Result " +
-      "page) comes back as prescription.type 'amreps/ascending' instead, and there is no " +
-      "logger for that type yet - call this tool on one first, then use the result to " +
-      "write/extend a logger.",
+      "log_* tool here was reverse-engineered. Call it on a workout whose type has no " +
+      "logger yet (log_amrap_workout handles plain 'amrap'; ascending ladders such as " +
+      "'2-4-6-8-10...' are 'amreps/ascending' and use log_ascending_amreps_workout) and use " +
+      "the result to write/extend a logger.",
     inputSchema: {
       type: "object",
       properties: {
@@ -665,8 +809,10 @@ const TOOLS = [
       "specific prescribed workout - e.g. a class track's chipper - optionally linked " +
       "to a track event. Movements, reps and distances come from the workout's own " +
       "prescription; `loads` overrides a movement's load by position for a scaled " +
-      "result (null keeps the prescribed load). Only results finished under the cap " +
-      "are supported. Use get_track_events to find workoutId/workoutSlug/trackEventId. " +
+      "result (null keeps the prescribed load). For a plain For Time or Rounds For Time " +
+      "workout only results finished under the cap are supported. For a time-capped chipper " +
+      "(BTWB type forTime/timeCap) pass totalTimeSeconds if you finished, or repsCompleted " +
+      "(total reps done) if you hit the cap. Use get_track_events to find workoutId/workoutSlug/trackEventId. " +
       "Every entry logged through this tool is always posted with Privacy: Only Me - " +
       "this is hardcoded and cannot be overridden.",
     inputSchema: {
@@ -675,6 +821,10 @@ const TOOLS = [
         workoutId: { type: "number", description: "Numeric workout ID (from get_track_events or the workout URL)" },
         workoutSlug: { type: "string", description: "Workout URL slug (from get_track_events or the workout URL)" },
         totalTimeSeconds: { type: "number", description: "Finish time in seconds (e.g. 13:43 -> 823)" },
+        repsCompleted: {
+          type: "number",
+          description: "Time-capped chippers only: total reps completed when the cap hit (instead of totalTimeSeconds)",
+        },
         performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
         rxd: { type: "boolean", default: true, description: "true = As Prescribed (Rx'd), false = Modified/scaled" },
         loads: {
@@ -693,7 +843,7 @@ const TOOLS = [
         notes: { type: "string", description: "Optional notes for the entry" },
         trackEventId: { type: "number", description: "Optional track_event ID to link the result to (from get_track_events)" },
       },
-      required: ["workoutId", "workoutSlug", "totalTimeSeconds", "performedDate"],
+      required: ["workoutId", "workoutSlug", "performedDate"],
     },
   },
   {
@@ -857,6 +1007,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "log_amrap_workout":
         result = await logAmrapWorkout(args);
+        break;
+      case "log_time_each_round_workout":
+        result = await logTimeEachRoundWorkout(args);
+        break;
+      case "log_rounds_max_reps_workout":
+        result = await logRoundsMaxRepsWorkout(args);
+        break;
+      case "log_effort_sets_workout":
+        result = await logEffortSetsWorkout(args);
+        break;
+      case "log_ascending_amreps_workout":
+        result = await logAscendingAmrepsWorkout(args);
         break;
       case "log_timed_rounds_workout":
         result = await logTimedRoundsWorkout(args);
