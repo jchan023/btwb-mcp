@@ -216,3 +216,82 @@ describe("logTimedRoundsWorkout", () => {
     await assert.rejects(attempt({ type: "amrap" }, [1, 1, 1, 1, 1]), /only handles timedRounds\/maxReps/);
   });
 });
+
+describe("logAscendingAmrepsWorkout", () => {
+  const ladder = {
+    type: "amreps/ascending",
+    startReps: { value: 2, unit: "reps" },
+    addReps: { value: 2, unit: "reps" },
+    time: { value: 480, unit: "seconds" },
+    inputs: ["rounds"],
+    scoring: "totalReps",
+  };
+  const couplet = [
+    { type: "movement", movementName: "Alternating Dumbbell Snatch", movementId: 4605, weight: { value: 50, unit: "lbs" }, inputs: ["reps"] },
+    { type: "movement", movementName: "Lateral Burpee Double Jump", movementId: 44872, inputs: ["reps"] },
+  ];
+
+  it("posts rounds, per-movement partials and the BTWB totalReps, privately", async () => {
+    const { calls } = installFakeBtwb(withPage(logPage(ladder, couplet)));
+    const client = await freshClient();
+
+    const out = await client.logAscendingAmrepsWorkout({
+      workoutId: 3, workoutSlug: "cheat-code", rounds: 6, extraReps: 14, performedDate: "2026-11-02",
+      rxd: false, trackEventId: 344853724,
+    });
+
+    const ui = postedUiobject(calls);
+    assert.equal(ui.execution.type, "amreps/ascending");
+    assert.equal(ui.execution.scoring, "totalReps");
+    assert.equal(ui.execution.inputs.rounds, 6);
+    // rounds 1-6 = (2+4+6+8+10+12) x 2 movements = 84, plus 14 partial reps.
+    assert.equal(ui.execution.result.totalReps, 98);
+    assert.equal(out.totalReps, 98);
+    assert.deepEqual(ui.contents.map((c) => c.inputs.reps.value), [14, 0]);
+    const form = new URLSearchParams(writes(calls)[0].body);
+    assert.equal(form.get("workout_session[privacy]"), "onlyme");
+    assert.equal(form.get("workout_session[rxd]"), "false");
+    assert.equal(form.get("track_event_ids[]"), "344853724");
+  });
+
+  it("spills extra reps into the next movement and applies a load override", async () => {
+    const { calls } = installFakeBtwb(withPage(logPage(ladder, couplet)));
+    const client = await freshClient();
+
+    const out = await client.logAscendingAmrepsWorkout({
+      workoutId: 3, workoutSlug: "cheat-code", rounds: 2, extraReps: 9, performedDate: "2026-11-02",
+      loads: [{ weight: 35 }],
+    });
+
+    const ui = postedUiobject(calls);
+    // next round is 6 reps each: 6 snatches then 3 burpees; (2+4) x 2 + 9 = 21.
+    assert.deepEqual(ui.contents.map((c) => c.inputs.reps.value), [6, 3]);
+    assert.equal(ui.contents[0].weight.value, 35);
+    assert.equal(out.totalReps, 21);
+  });
+
+  it("rejects bad scores, other prescription types and non-movement items", async () => {
+    installFakeBtwb(withPage(logPage(ladder, couplet)));
+    let client = await freshClient();
+    await assert.rejects(
+      client.logAscendingAmrepsWorkout({ workoutId: 3, workoutSlug: "x", rounds: 1, extraReps: 13, performedDate: "2026-11-02" }),
+      /more than one full round/
+    );
+    await assert.rejects(
+      client.logAscendingAmrepsWorkout({ workoutId: 3, workoutSlug: "x", rounds: 1.5, performedDate: "2026-11-02" }),
+      /whole number/
+    );
+    installFakeBtwb(withPage(logPage({ type: "amrap" }, couplet)));
+    client = await freshClient();
+    await assert.rejects(
+      client.logAscendingAmrepsWorkout({ workoutId: 3, workoutSlug: "x", rounds: 1, performedDate: "2026-11-02" }),
+      /only handles amreps\/ascending/
+    );
+    installFakeBtwb(withPage(logPage(ladder, [...couplet, { type: "rest" }])));
+    client = await freshClient();
+    await assert.rejects(
+      client.logAscendingAmrepsWorkout({ workoutId: 3, workoutSlug: "x", rounds: 1, performedDate: "2026-11-02" }),
+      /purely of movements/
+    );
+  });
+});

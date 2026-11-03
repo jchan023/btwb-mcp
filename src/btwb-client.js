@@ -557,11 +557,9 @@ export async function getTrackEvents({ date, track } = {}) {
 //   amrap               -> amrap                  -> logAmrapWorkout
 //   timedRounds-maxReps -> timedRounds/maxReps    -> logTimedRoundsWorkout
 //
-//   Confirmed type string, no logger yet:
 //   amreps-ascending -> amreps/ascending - hit live 11/2/2026 (an
 //     ascending-ladder AMRAP, e.g. a "2-4-6-8-10..." couplet, scored
-//     "Rounds + Reps" on its own Log Result page). Inspect it with
-//     get_workout_prescription before writing a logger for it.
+//     "Rounds + Reps" on its own Log Result page) -> logAscendingAmrepsWorkout
 //
 //   In the bundle's taxonomy, wire format unconfirmed, no logger:
 //   alternating-emom, amrapBuyIn, amrapMaxRep, amrapRepeats, amreps (plain,
@@ -844,7 +842,10 @@ export async function logAmrapWorkout({
   // upfront buy-in movement) and could silently post a wrong result instead
   // of failing loudly. Only the exact string "amrap" has been verified.
   if (prescription.type !== "amrap") {
-    throw new Error(`log_amrap_workout only handles AMRAP workouts; this one is "${prescription.type}".`);
+    throw new Error(
+      `log_amrap_workout only handles AMRAP workouts; this one is "${prescription.type}".` +
+        (prescription.type === "amreps/ascending" ? " Use log_ascending_amreps_workout for it." : "")
+    );
   }
   // BTWB records the unfinished round as per-movement "partials", filled in
   // prescription order; the score is rounds + the mean fraction of each
@@ -894,20 +895,120 @@ export async function logAmrapWorkout({
   });
 }
 
+// Logs a finished ascending-ladder AMRAP ("AMReps 2-4-6-8-10...", prescription
+// type "amreps/ascending", scored totalReps / "Rounds + Reps") against a
+// specific prescribed workout, optionally linked to a track event. Shape taken
+// from BTWB's own logger bundle (new-new-logger, the "amreps-ascending" style),
+// not guessed: `inputs.rounds` is the number of COMPLETED rounds, each movement
+// carries `inputs.reps` = its reps in the unfinished round (at most
+// startReps + addReps * rounds), and `result.totalReps` is the sum over
+// completed rounds of (startReps + addReps * roundIndex) * movementCount, plus
+// all partials. Like logAmrapWorkout, `extraReps` is filled across movements in
+// prescription order. `loads` optionally overrides a movement's load by
+// position for a scaled result.
+export async function logAscendingAmrepsWorkout({
+  workoutId,
+  workoutSlug,
+  rounds,
+  extraReps = 0,
+  performedDate,
+  rxd = true,
+  loads = [],
+  notes = "",
+  trackEventId,
+}) {
+  if (!Number.isInteger(rounds) || rounds < 0) {
+    throw new Error(`rounds must be a whole number of completed rounds, 0 or more (got ${rounds}).`);
+  }
+  if (!Number.isInteger(extraReps) || extraReps < 0) {
+    throw new Error(`extraReps must be a whole number, 0 or more (got ${extraReps}).`);
+  }
+  const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  const prescription = workout.prescription || {};
+  // Exact match, not a prefix test - same reasoning as logAmrapWorkout. The
+  // plain "amreps" type and the other AMRAP variants are different structures.
+  if (prescription.type !== "amreps/ascending") {
+    throw new Error(
+      `log_ascending_amreps_workout only handles amreps/ascending workouts; this one is "${prescription.type}".`
+    );
+  }
+  const startReps = prescription.startReps?.value;
+  const addReps = prescription.addReps?.value;
+  if (!Number.isFinite(startReps) || !Number.isFinite(addReps)) {
+    throw new Error("This workout's prescription is missing startReps/addReps - can't compute a score.");
+  }
+  const items = workout.contents || [];
+  if (items.length === 0 || items.some((item) => item.type !== "movement")) {
+    // BTWB's logger also handles rests and complexes here, but their partials
+    // and totals haven't been verified, so fail loudly instead of guessing.
+    throw new Error(
+      "log_ascending_amreps_workout only handles workouts made purely of movements; " +
+        "this one has other items (rest/complex)."
+    );
+  }
+
+  // BTWB's own cap for any one movement's partial: the rep count of the next round.
+  const maxPartial = startReps + addReps * rounds;
+  let repsLeft = extraReps;
+  const contents = items.map((item, i) => {
+    const { inputs, ...rest } = item;
+    const load = loads[i];
+    const done = Math.min(repsLeft, maxPartial);
+    repsLeft -= done;
+    return {
+      ...rest,
+      ...(load ? { weight: { value: load.weight, unit: load.weightUnit || "lbs" } } : {}),
+      inputs: { reps: { value: done, unit: "reps" } },
+    };
+  });
+  if (repsLeft > 0) {
+    throw new Error(
+      `extraReps ${extraReps} is more than one full round across ${items.length} movements ` +
+        `(the next round is ${maxPartial} reps each).`
+    );
+  }
+
+  let completedReps = 0;
+  for (let r = 0; r < rounds; r += 1) completedReps += (startReps + addReps * r) * items.length;
+  const totalReps = completedReps + extraReps;
+
+  const uiobject = {
+    type: "workoutSession",
+    execution: {
+      type: prescription.type,
+      startReps: prescription.startReps,
+      addReps: prescription.addReps,
+      ...(prescription.time ? { time: prescription.time } : {}),
+      inputs: { rounds },
+      scoring: "totalReps",
+      result: { totalReps },
+    },
+    contents,
+  };
+  const result = await postPrescribedSession({
+    toolName: "log_ascending_amreps_workout",
+    workoutId,
+    workoutSlug,
+    csrfToken,
+    uiobject,
+    performedDate,
+    rxd,
+    notes,
+    trackEventId,
+  });
+  return { ...result, totalReps };
+}
+
 // Reads a prescribed workout's own "Log Result" page and returns its raw
 // prescription JSON (the `var uiobject` BTWB's logger is seeded with) without
 // posting anything - a read-only way to see the exact shape BTWB uses for a
 // workout type before writing (or extending) a logger for it. This is how
 // every log_* function above was reverse-engineered in the first place; this
 // tool just exposes that same lookup directly instead of leaving it as a
-// private helper. Surfaced because log_amrap_workout only handles
-// prescription.type values starting with "amrap" - an ascending-ladder AMRAP
-// like "2-4-6-8-10... reps" (BTWB labels it "amreps/ascending", confirmed by
-// the error message when log_amrap_workout is pointed at one, and scores it
-// as "Rounds + Reps" per its own Log Result page) is not one of them, and no
-// logger here has been written for "amreps/ascending" yet because its real
-// prescription/result JSON shape hasn't been inspected against a live
-// session. Call this first, then open an issue/PR with what it returns.
+// private helper. Surfaced so a new workout type can be inspected before a
+// logger is written for it (an ascending-ladder AMRAP, "amreps/ascending", was
+// handled this way and now has log_ascending_amreps_workout). Call this first
+// on a type with no logger yet, then open an issue/PR with what it returns.
 export async function getWorkoutPrescription({ workoutId, workoutSlug, performedDate }) {
   const { workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
   return {
