@@ -16,6 +16,8 @@ import {
   logForTimeWorkout,
   logAmrapWorkout,
   logAscendingAmrepsWorkout,
+  logTimeEachRoundWorkout,
+  logEffortSetsWorkout,
   logTimedRoundsWorkout,
   getWorkoutPrescription,
   getMovementHistory,
@@ -644,6 +646,75 @@ const TOOLS = [
     },
   },
   {
+    name: "log_time_each_round_workout",
+    description:
+      "Log a timeEachRound result (e.g. '3x RFT: Dumbbell Bench Press, Devil Press, Wall Walks' " +
+      "where every round is timed) against that specific prescribed workout, optionally linked " +
+      "to a track event. `roundTimesSeconds` is one time per round, in order (e.g. 4:05 -> 245); " +
+      "BTWB totals them. `loads` overrides a movement's load by position for a scaled result. " +
+      "Use get_track_events to find workoutId/workoutSlug/trackEventId. Every entry is always " +
+      "posted with Privacy: Only Me - hardcoded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        roundTimesSeconds: { type: "array", items: { type: "number" }, description: "One time in seconds per round, in order" },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        loads: {
+          type: "array",
+          description: "Optional per-item load overrides by position; null keeps prescribed",
+          items: {
+            type: ["object", "null"],
+            properties: { weight: { type: "number" }, weightUnit: { type: "string", enum: ["lbs", "kg"] } },
+          },
+        },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "roundTimesSeconds", "performedDate"],
+    },
+  },
+  {
+    name: "log_effort_sets_workout",
+    description:
+      "Log a gymnastics/sets result (e.g. 'Strict Ring Dips: 10x max rep', scored in total reps) " +
+      "or a monostructural/sets result (e.g. 'Row: 4x 1500 m, rest 2:30', scored in total time or " +
+      "distance) against that specific prescribed workout, optionally linked to a track event. " +
+      "`sets` has one entry per prescribed set, in order, each with whatever that set asks for: " +
+      "`reps`, `timeSeconds`, `distance` (+ optional `distanceUnit`) or `weight`. BTWB computes the " +
+      "total. Use get_workout_prescription to see which inputs a workout wants. Use " +
+      "get_track_events to find workoutId/workoutSlug/trackEventId. Every entry is always posted " +
+      "with Privacy: Only Me - hardcoded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        sets: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              reps: { type: "number" },
+              timeSeconds: { type: "number" },
+              distance: { type: "number" },
+              distanceUnit: { type: "string" },
+              weight: { type: "number" },
+              weightUnit: { type: "string", enum: ["lbs", "kg"] },
+            },
+          },
+        },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "sets", "performedDate"],
+    },
+  },
+  {
     name: "log_timed_rounds_workout",
     description:
       "Log a timed-rounds, max-reps result (e.g. a class RemReps piece like '5 x 1 min: " +
@@ -699,8 +770,10 @@ const TOOLS = [
       "specific prescribed workout - e.g. a class track's chipper - optionally linked " +
       "to a track event. Movements, reps and distances come from the workout's own " +
       "prescription; `loads` overrides a movement's load by position for a scaled " +
-      "result (null keeps the prescribed load). Only results finished under the cap " +
-      "are supported. Use get_track_events to find workoutId/workoutSlug/trackEventId. " +
+      "result (null keeps the prescribed load). For a plain For Time or Rounds For Time " +
+      "workout only results finished under the cap are supported. For a time-capped chipper " +
+      "(BTWB type forTime/timeCap) pass totalTimeSeconds if you finished, or repsCompleted " +
+      "(total reps done) if you hit the cap. Use get_track_events to find workoutId/workoutSlug/trackEventId. " +
       "Every entry logged through this tool is always posted with Privacy: Only Me - " +
       "this is hardcoded and cannot be overridden.",
     inputSchema: {
@@ -709,6 +782,10 @@ const TOOLS = [
         workoutId: { type: "number", description: "Numeric workout ID (from get_track_events or the workout URL)" },
         workoutSlug: { type: "string", description: "Workout URL slug (from get_track_events or the workout URL)" },
         totalTimeSeconds: { type: "number", description: "Finish time in seconds (e.g. 13:43 -> 823)" },
+        repsCompleted: {
+          type: "number",
+          description: "Time-capped chippers only: total reps completed when the cap hit (instead of totalTimeSeconds)",
+        },
         performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
         rxd: { type: "boolean", default: true, description: "true = As Prescribed (Rx'd), false = Modified/scaled" },
         loads: {
@@ -727,7 +804,7 @@ const TOOLS = [
         notes: { type: "string", description: "Optional notes for the entry" },
         trackEventId: { type: "number", description: "Optional track_event ID to link the result to (from get_track_events)" },
       },
-      required: ["workoutId", "workoutSlug", "totalTimeSeconds", "performedDate"],
+      required: ["workoutId", "workoutSlug", "performedDate"],
     },
   },
   {
@@ -891,6 +968,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "log_amrap_workout":
         result = await logAmrapWorkout(args);
+        break;
+      case "log_time_each_round_workout":
+        result = await logTimeEachRoundWorkout(args);
+        break;
+      case "log_effort_sets_workout":
+        result = await logEffortSetsWorkout(args);
         break;
       case "log_ascending_amreps_workout":
         result = await logAscendingAmrepsWorkout(args);

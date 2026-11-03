@@ -557,6 +557,9 @@ export async function getTrackEvents({ date, track } = {}) {
 //   amrap               -> amrap                  -> logAmrapWorkout
 //   timedRounds-maxReps -> timedRounds/maxReps    -> logTimedRoundsWorkout
 //
+//   forTime/timeCap, timeEachRound, gymnastics/sets and monostructural/sets were
+//   added 11/2/2026 from BTWB's own logger bundle and verified with throwaway
+//   entries (logForTimeWorkout, logTimeEachRoundWorkout, logEffortSetsWorkout).
 //   amreps-ascending -> amreps/ascending - hit live 11/2/2026 (an
 //     ascending-ladder AMRAP, e.g. a "2-4-6-8-10..." couplet, scored
 //     "Rounds + Reps" on its own Log Result page) -> logAscendingAmrepsWorkout
@@ -749,6 +752,7 @@ export async function logForTimeWorkout({
   workoutId,
   workoutSlug,
   totalTimeSeconds,
+  repsCompleted,
   performedDate,
   rxd = true,
   loads = [],
@@ -757,6 +761,15 @@ export async function logForTimeWorkout({
 }) {
   const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
   const prescription = workout.prescription || {};
+  if (prescription.type === "forTime/timeCap") {
+    return logTimeCapForTime({
+      workoutId, workoutSlug, csrfToken, workout, totalTimeSeconds, repsCompleted,
+      performedDate, rxd, loads, notes, trackEventId,
+    });
+  }
+  if (!Number.isFinite(totalTimeSeconds)) {
+    throw new Error("totalTimeSeconds is required (repsCompleted only applies to time-capped chippers).");
+  }
   // Exact match, not a prefix test: BTWB's own prescriptionType taxonomy (see
   // the "Known BTWB prescription types" block below) has a "rftVaryingReps"
   // type alongside plain "forTime"/"roundsForTime" - a prefix regex would
@@ -813,6 +826,95 @@ export async function logForTimeWorkout({
     rxd,
     notes,
     trackEventId,
+  });
+}
+
+// "forTime/timeCap" (a chipper with a time cap and a total rep count, e.g. "Room
+// on the Broom") has its own wire type: execution.timeCap = {time, reps}, and
+// two scorings, taken from BTWB's own logger bundle. Finished under the cap:
+// scoring totalTime, inputs.time, result.totalTime, contents as prescribed.
+// Capped: scoring timeCapped, inputs.reps, result {totalTime: cap + totalReps -
+// repsCompleted, totalReps: repsCompleted}, and each movement's inputs.reps
+// holds the reps done, filled in prescription order ("" for movements never
+// reached) - BTWB's ForTimeTimeCapContents.
+async function logTimeCapForTime({
+  workoutId, workoutSlug, csrfToken, workout, totalTimeSeconds, repsCompleted,
+  performedDate, rxd, loads, notes, trackEventId,
+}) {
+  const { timeCap } = workout.prescription;
+  const capSeconds = timeCap?.time?.value;
+  const totalReps = timeCap?.reps?.value;
+  if (!Number.isFinite(capSeconds) || !Number.isFinite(totalReps)) {
+    throw new Error("This chipper's prescription is missing its time cap or total reps - can't score it.");
+  }
+  const finished = Number.isFinite(totalTimeSeconds);
+  const capped = repsCompleted != null;
+  if (finished === capped) {
+    throw new Error(
+      "Pass exactly one of totalTimeSeconds (finished under the cap) or repsCompleted (hit the cap)."
+    );
+  }
+  const items = (workout.contents || []).map((item, i) => {
+    if (item.type !== "movement") return item;
+    const { inputs, ...rest } = item;
+    const load = loads[i];
+    return {
+      ...rest,
+      ...(load ? { weight: { value: load.weight, unit: load.weightUnit || "lbs" } } : {}),
+    };
+  });
+
+  let execution;
+  let contents = items;
+  if (finished) {
+    if (totalTimeSeconds > capSeconds) {
+      throw new Error(`${totalTimeSeconds}s is over the ${capSeconds}s time cap - pass repsCompleted instead.`);
+    }
+    const time = { value: totalTimeSeconds, unit: "seconds" };
+    execution = {
+      type: "forTime/timeCap",
+      timeCap,
+      inputs: { time },
+      scoring: "totalTime",
+      result: { totalTime: time },
+    };
+  } else {
+    if (!Number.isInteger(repsCompleted) || repsCompleted < 0 || repsCompleted >= totalReps) {
+      throw new Error(
+        `repsCompleted must be a whole number from 0 to ${totalReps - 1} (all ${totalReps} reps means you finished: pass totalTimeSeconds).`
+      );
+    }
+    let left = repsCompleted;
+    contents = items.map((item) => {
+      if (item.type !== "movement") return item;
+      const prescribed = item.reps?.value ?? 0;
+      let done = "";
+      if (left >= prescribed) {
+        done = prescribed;
+        left -= prescribed;
+      } else if (left > 0) {
+        done = left;
+        left = 0;
+      }
+      return { ...item, inputs: { reps: { value: done, unit: "reps" } } };
+    });
+    execution = {
+      type: "forTime/timeCap",
+      timeCap,
+      inputs: { reps: { value: repsCompleted, unit: "reps" } },
+      scoring: "timeCapped",
+      result: {
+        totalTime: { value: capSeconds + totalReps - repsCompleted, unit: "seconds" },
+        totalReps: { value: repsCompleted, unit: "reps" },
+      },
+    };
+  }
+
+  return postPrescribedSession({
+    toolName: "log_for_time_workout",
+    workoutId, workoutSlug, csrfToken,
+    uiobject: { type: "workoutSession", execution, contents },
+    performedDate, rxd, notes, trackEventId,
   });
 }
 
@@ -997,6 +1099,158 @@ export async function logAscendingAmrepsWorkout({
     trackEventId,
   });
   return { ...result, totalReps };
+}
+
+// Logs a "timeEachRound" result (e.g. "3x RFT: Dumbbell Bench Press, Devil Press,
+// Wall Walks" where each round is timed separately) against that prescribed
+// workout. One time per round, in order; the total is their sum. Shape from
+// BTWB's own logger bundle: execution {type, rounds, rest, inputs: [{time,
+// start, stop}] (start/stop are 0 in the plain per-round timing style),
+// scoring totalTime, result.totalTime}. The "running clock" timing style
+// (inputs with start/stop stamps) isn't supported.
+export async function logTimeEachRoundWorkout({
+  workoutId,
+  workoutSlug,
+  roundTimesSeconds,
+  performedDate,
+  rxd = true,
+  loads = [],
+  notes = "",
+  trackEventId,
+}) {
+  const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  const prescription = workout.prescription || {};
+  if (prescription.type !== "timeEachRound") {
+    throw new Error(
+      `log_time_each_round_workout only handles timeEachRound workouts; this one is "${prescription.type}".`
+    );
+  }
+  if (!Array.isArray(prescription.inputs) || !prescription.inputs.includes("time")) {
+    throw new Error("This timeEachRound workout uses running-clock timing, which isn't supported.");
+  }
+  if (
+    !Array.isArray(roundTimesSeconds) ||
+    roundTimesSeconds.length !== prescription.rounds ||
+    roundTimesSeconds.some((t) => !Number.isFinite(t) || t < 0)
+  ) {
+    throw new Error(
+      `roundTimesSeconds needs exactly ${prescription.rounds} non-negative times in seconds, one per round.`
+    );
+  }
+  const sec = (value) => ({ value, unit: "seconds" });
+  const total = roundTimesSeconds.reduce((sum, t) => sum + t, 0);
+  const contents = (workout.contents || []).map((item, i) => {
+    if (item.type !== "movement") return item;
+    const { inputs, ...rest } = item;
+    const load = loads[i];
+    return {
+      ...rest,
+      ...(load ? { weight: { value: load.weight, unit: load.weightUnit || "lbs" } } : {}),
+    };
+  });
+  const uiobject = {
+    type: "workoutSession",
+    execution: {
+      type: prescription.type,
+      rounds: prescription.rounds,
+      ...(prescription.rest ? { rest: prescription.rest } : {}),
+      inputs: roundTimesSeconds.map((t) => ({ time: sec(t), start: sec(0), stop: sec(0) })),
+      scoring: "totalTime",
+      result: { totalTime: sec(total) },
+    },
+    contents,
+  };
+  const result = await postPrescribedSession({
+    toolName: "log_time_each_round_workout",
+    workoutId, workoutSlug, csrfToken, uiobject, performedDate, rxd, notes, trackEventId,
+  });
+  return { ...result, totalTimeSeconds: total };
+}
+
+// Logs a gymnastics/sets (e.g. "Strict Ring Dips: 10x max rep", scored
+// totalReps) or monostructural/sets (e.g. "Row: 4x 1500 m, rest 2:30", scored
+// totalTime or totalDistance) result against that prescribed workout. One entry
+// per prescribed movement, in order, carrying whichever of reps / timeSeconds /
+// distance / weight that movement's prescription asks for. The score is the sum
+// BTWB's own logger computes. Shape from its bundle (execution {type, rest?,
+// every?, tempo?, scoring, result}; each movement gets inputs {reps|time|...}).
+export async function logEffortSetsWorkout({
+  workoutId,
+  workoutSlug,
+  sets,
+  performedDate,
+  rxd = true,
+  notes = "",
+  trackEventId,
+}) {
+  const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  const prescription = workout.prescription || {};
+  if (!["gymnastics/sets", "monostructural/sets"].includes(prescription.type)) {
+    throw new Error(
+      `log_effort_sets_workout only handles gymnastics/sets and monostructural/sets workouts; this one is "${prescription.type}".`
+    );
+  }
+  const items = (workout.contents || []).filter((c) => c.type === "movement");
+  if ((workout.contents || []).some((c) => c.type !== "movement")) {
+    throw new Error("This workout has rests or complexes between sets, which aren't supported yet.");
+  }
+  if (items.length !== (sets || []).length) {
+    throw new Error(
+      `This workout prescribes ${items.length} sets but ${(sets || []).length} were given - ` +
+        "pass one entry per prescribed set, in order."
+    );
+  }
+
+  const totals = { reps: 0, time: 0, distance: 0 };
+  let distanceUnit;
+  const contents = items.map((item, i) => {
+    const { inputs: wanted, ...rest } = item;
+    const given = sets[i] || {};
+    const inputs = {};
+    for (const key of Array.isArray(wanted) ? wanted : []) {
+      if (key === "reps") {
+        if (!Number.isInteger(given.reps) || given.reps < 0) throw new Error(`Set ${i + 1} needs reps (a whole number).`);
+        inputs.reps = { value: given.reps, unit: "reps" };
+        totals.reps += given.reps;
+      } else if (key === "time") {
+        if (!Number.isFinite(given.timeSeconds) || given.timeSeconds < 0) throw new Error(`Set ${i + 1} needs timeSeconds.`);
+        inputs.time = { value: given.timeSeconds, unit: "seconds" };
+        totals.time += given.timeSeconds;
+      } else if (key === "distance") {
+        if (!Number.isFinite(given.distance) || given.distance < 0) throw new Error(`Set ${i + 1} needs distance.`);
+        const unit = given.distanceUnit || item.distance?.unit || "m";
+        distanceUnit ??= unit;
+        if (unit !== distanceUnit) throw new Error("All sets must use the same distance unit.");
+        inputs.distance = { value: given.distance, unit };
+        totals.distance += given.distance;
+      } else if (key === "weight") {
+        if (!Number.isFinite(given.weight)) throw new Error(`Set ${i + 1} needs weight.`);
+        inputs.weight = { value: given.weight, unit: given.weightUnit || "lbs" };
+      } else {
+        throw new Error(`Set ${i + 1} asks for an input ("${key}") this tool doesn't know how to fill.`);
+      }
+    }
+    return { ...rest, ...(Object.keys(inputs).length ? { inputs } : {}) };
+  });
+
+  const { type, ...executionFields } = prescription;
+  let scoring = prescription.scoring || "completed";
+  if (scoring === "notscored") scoring = "completed";
+  let result = {};
+  if (scoring === "totalReps") result = { result: { totalReps: totals.reps } };
+  else if (scoring === "totalTime") result = { result: { totalTime: { value: totals.time, unit: "seconds" } } };
+  else if (scoring === "totalDistance") {
+    result = { result: { totalDistance: { value: totals.distance, unit: distanceUnit || "m" } } };
+  } else if (scoring !== "completed") {
+    throw new Error(`Scoring "${scoring}" isn't supported by log_effort_sets_workout.`);
+  }
+  const posted = await postPrescribedSession({
+    toolName: "log_effort_sets_workout",
+    workoutId, workoutSlug, csrfToken,
+    uiobject: { type: "workoutSession", execution: { type, ...executionFields, scoring, ...result }, contents },
+    performedDate, rxd, notes, trackEventId,
+  });
+  return { ...posted, scoring, totals };
 }
 
 // Reads a prescribed workout's own "Log Result" page and returns its raw
