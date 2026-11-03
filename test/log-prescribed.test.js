@@ -453,3 +453,64 @@ describe("logEffortSetsWorkout", () => {
     );
   });
 });
+
+describe("logRoundsMaxRepsWorkout", () => {
+  const rx = { type: "roundsForMaxReps", rounds: 3, scoring: "totalReps" };
+  const strength = [
+    { type: "movement", movementName: "Front Squat", movementId: 26, reps: { value: 10, unit: "reps" }, weight: { value: 0, unit: "pickload" }, inputs: ["weight"] },
+    { type: "movement", movementName: "Strict Pull-up", movementId: 108, reps: { value: 0, unit: "maxreps" } },
+  ];
+
+  it("posts per-round scores on the max-rep movement, the pick-load weight and the totals", async () => {
+    const { calls } = installFakeBtwb(withPage(logPage(rx, strength)));
+    const client = await freshClient();
+    const out = await client.logRoundsMaxRepsWorkout({
+      workoutId: 8, workoutSlug: "rfme", roundScores: [6, 5, 4], loads: [{ weight: 185 }], performedDate: "2026-11-02", rxd: false,
+    });
+    const ui = postedUiobject(calls);
+    assert.equal(out.totalReps, 15);
+    assert.deepEqual(ui.execution.result, { totalReps: 15, scores: [6, 5, 4] });
+    assert.equal(ui.execution.scoring, "totalReps");
+    assert.deepEqual(ui.contents[0].inputs, { weight: { value: 185, unit: "lbs" } });
+    assert.deepEqual(ui.contents[1].scores, [6, 5, 4]);
+    assert.equal(ui.contents[0].scores, undefined);
+    const form = new URLSearchParams(writes(calls)[0].body);
+    assert.equal(form.get("workout_session[privacy]"), "onlyme");
+  });
+
+  it("sums several max-rep movements per round", async () => {
+    const items = [
+      { type: "movement", movementName: "Run", movementId: 5, reps: { value: 0, unit: "maxreps" } },
+      { type: "movement", movementName: "Handstand Hold", movementId: 11187, time: { value: 15, unit: "seconds" } },
+      { type: "movement", movementName: "Ski Erg", movementId: 2115, reps: { value: 0, unit: "maxreps" } },
+    ];
+    const { calls } = installFakeBtwb(withPage(logPage({ ...rx, rounds: 2 }, items)));
+    const client = await freshClient();
+    await client.logRoundsMaxRepsWorkout({
+      workoutId: 8, workoutSlug: "rfme", roundScores: [[300, 250], [290, 240]], performedDate: "2026-11-02",
+    });
+    const ui = postedUiobject(calls);
+    assert.deepEqual(ui.execution.result, { totalReps: 1080, scores: [550, 530] });
+    assert.deepEqual(ui.contents[0].scores, [300, 290]);
+    assert.deepEqual(ui.contents[2].scores, [250, 240]);
+    assert.equal(ui.contents[1].scores, undefined);
+  });
+
+  it("rejects wrong round counts, bad scores, a missing pick-load weight and other types", async () => {
+    const cases = [
+      [rx, strength, { roundScores: [1, 2], loads: [{ weight: 100 }] }, /exactly 3 entries/],
+      [rx, strength, { roundScores: [1, 2, -1], loads: [{ weight: 100 }] }, /Round 3 needs 1 whole-number/],
+      [rx, strength, { roundScores: [[1, 2], 2, 3], loads: [{ weight: 100 }] }, /Round 1 needs 1 whole-number/],
+      [rx, strength, { roundScores: [1, 2, 3] }, /pick-load/],
+      [{ type: "forTime" }, strength, { roundScores: [1, 2, 3] }, /only handles roundsForMaxReps/],
+    ];
+    for (const [prescription, contents, args, message] of cases) {
+      installFakeBtwb(withPage(logPage(prescription, contents)));
+      const client = await freshClient();
+      await assert.rejects(
+        client.logRoundsMaxRepsWorkout({ workoutId: 8, workoutSlug: "x", performedDate: "2026-11-02", ...args }),
+        message
+      );
+    }
+  });
+});

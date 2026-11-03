@@ -18,6 +18,7 @@ import {
   logAscendingAmrepsWorkout,
   logTimeEachRoundWorkout,
   logEffortSetsWorkout,
+  logRoundsMaxRepsWorkout,
   logTimedRoundsWorkout,
   getWorkoutPrescription,
   getMovementHistory,
@@ -715,6 +716,44 @@ const TOOLS = [
     },
   },
   {
+    name: "log_rounds_max_reps_workout",
+    description:
+      "Log a roundsForMaxReps result (e.g. '5 RF-ME: Front Squats and Strict Pull-ups' - each " +
+      "round is some fixed work plus max reps of one movement) against that specific " +
+      "prescribed workout, optionally linked to a track event. `roundScores` has one entry per " +
+      "round: the max reps that round (a number when there is one max-rep movement, otherwise " +
+      "an array with one number per max-rep movement in prescription order). Pick-load " +
+      "movements need their weight in `loads` at that movement's position. BTWB totals the " +
+      "score. Use get_workout_prescription to see the movements. Use get_track_events to find " +
+      "workoutId/workoutSlug/trackEventId. Every entry is always posted with Privacy: Only Me - " +
+      "hardcoded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        roundScores: {
+          type: "array",
+          items: { anyOf: [{ type: "number" }, { type: "array", items: { type: "number" } }] },
+          description: "One entry per round: max reps (number), or an array of max reps per max-rep movement",
+        },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        loads: {
+          type: "array",
+          description: "Per-item loads by position (required for pick-load movements); null keeps prescribed",
+          items: {
+            type: ["object", "null"],
+            properties: { weight: { type: "number" }, weightUnit: { type: "string", enum: ["lbs", "kg"] } },
+          },
+        },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "roundScores", "performedDate"],
+    },
+  },
+  {
     name: "log_timed_rounds_workout",
     description:
       "Log a timed-rounds, max-reps result (e.g. a class RemReps piece like '5 x 1 min: " +
@@ -971,6 +1010,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "log_time_each_round_workout":
         result = await logTimeEachRoundWorkout(args);
+        break;
+      case "log_rounds_max_reps_workout":
+        result = await logRoundsMaxRepsWorkout(args);
         break;
       case "log_effort_sets_workout":
         result = await logEffortSetsWorkout(args);

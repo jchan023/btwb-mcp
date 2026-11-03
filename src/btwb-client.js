@@ -557,7 +557,7 @@ export async function getTrackEvents({ date, track } = {}) {
 //   amrap               -> amrap                  -> logAmrapWorkout
 //   timedRounds-maxReps -> timedRounds/maxReps    -> logTimedRoundsWorkout
 //
-//   forTime/timeCap, timeEachRound, gymnastics/sets and monostructural/sets were
+//   forTime/timeCap, timeEachRound, roundsForMaxReps, gymnastics/sets and monostructural/sets were
 //   added 11/2/2026 from BTWB's own logger bundle and verified with throwaway
 //   entries (logForTimeWorkout, logTimeEachRoundWorkout, logEffortSetsWorkout).
 //   amreps-ascending -> amreps/ascending - hit live 11/2/2026 (an
@@ -1251,6 +1251,92 @@ export async function logEffortSetsWorkout({
     performedDate, rxd, notes, trackEventId,
   });
   return { ...posted, scoring, totals };
+}
+
+// Logs a "roundsForMaxReps" result (e.g. "5 RF-ME: Front Squats and Strict
+// Pull-ups" - every round, do the fixed work and then as many reps as possible
+// of the max-rep movement) against that prescribed workout. `roundScores` has
+// one entry per round: a number when the workout has exactly one max-rep
+// movement, otherwise an array with one number per max-rep movement, in
+// prescription order. `loads[i]` fills a pick-load movement's single weight
+// (BTWB asks for one per movement, not per round) or overrides a fixed load.
+// Shape from BTWB's own logger bundle: execution {type, rounds, scoring
+// totalReps, result {totalReps, scores: [round totals]}}, and every max-rep
+// movement carries `scores`: its reps in each round.
+export async function logRoundsMaxRepsWorkout({
+  workoutId,
+  workoutSlug,
+  roundScores,
+  performedDate,
+  rxd = true,
+  loads = [],
+  notes = "",
+  trackEventId,
+}) {
+  const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  const prescription = workout.prescription || {};
+  if (prescription.type !== "roundsForMaxReps") {
+    throw new Error(
+      `log_rounds_max_reps_workout only handles roundsForMaxReps workouts; this one is "${prescription.type}".`
+    );
+  }
+  const items = workout.contents || [];
+  if (items.some((item) => item.type !== "movement")) {
+    throw new Error("This workout has rests or complexes between movements, which aren't supported yet.");
+  }
+  const isMax = (item) => item.reps?.unit === "maxreps";
+  const maxIdx = items.flatMap((item, i) => (isMax(item) ? [i] : []));
+  if (maxIdx.length === 0) {
+    throw new Error("This roundsForMaxReps workout has no max-rep movement to score.");
+  }
+  if (!Array.isArray(roundScores) || roundScores.length !== prescription.rounds) {
+    throw new Error(`roundScores needs exactly ${prescription.rounds} entries, one per round.`);
+  }
+  const perRound = roundScores.map((entry, r) => {
+    const row = Array.isArray(entry) ? entry : [entry];
+    if (row.length !== maxIdx.length || row.some((n) => !Number.isInteger(n) || n < 0)) {
+      throw new Error(
+        `Round ${r + 1} needs ${maxIdx.length} whole-number score(s), one per max-rep movement ` +
+          `(${maxIdx.map((i) => items[i].movementName).join(", ")}).`
+      );
+    }
+    return row;
+  });
+
+  const contents = items.map((item, i) => {
+    const { inputs: wanted, ...rest } = item;
+    const load = loads[i];
+    const out = { ...rest };
+    if (Array.isArray(wanted) && wanted.includes("weight")) {
+      if (!load || !Number.isFinite(load.weight)) {
+        throw new Error(`${item.movementName} (item ${i + 1}) is pick-load: pass loads[${i}] = {weight}.`);
+      }
+      out.inputs = { weight: { value: load.weight, unit: load.weightUnit || "lbs" } };
+    } else if (load) {
+      out.weight = { value: load.weight, unit: load.weightUnit || "lbs" };
+    }
+    if (isMax(item)) out.scores = perRound.map((row) => row[maxIdx.indexOf(i)]);
+    return out;
+  });
+
+  const scores = perRound.map((row) => row.reduce((sum, n) => sum + n, 0));
+  const totalReps = scores.reduce((sum, n) => sum + n, 0);
+  const result = await postPrescribedSession({
+    toolName: "log_rounds_max_reps_workout",
+    workoutId, workoutSlug, csrfToken,
+    uiobject: {
+      type: "workoutSession",
+      execution: {
+        type: prescription.type,
+        rounds: prescription.rounds,
+        scoring: "totalReps",
+        result: { totalReps, scores },
+      },
+      contents,
+    },
+    performedDate, rxd, notes, trackEventId,
+  });
+  return { ...result, totalReps, roundTotals: scores };
 }
 
 // Reads a prescribed workout's own "Log Result" page and returns its raw
