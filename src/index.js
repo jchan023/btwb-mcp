@@ -24,6 +24,8 @@ import {
   getMovementHistory,
   createSetsWorkout,
   createAmrapWorkout,
+  createMultiEmomWorkout,
+  logMultiEmomWorkout,
   createForTimeWorkout,
   createForDistanceWorkout,
   createIntervalsWorkout,
@@ -545,6 +547,78 @@ const TOOLS = [
     },
   },
   {
+    name: "create_multi_emom_workout",
+    description:
+      "Define an EMOM where ALL the given movements are done inside every interval " +
+      "(e.g. 'Every 1:00 for 6:00: 10 Bench Press at 135 lb + 3 Strict Pull-ups'; BTWB " +
+      "type multiple/emom, scored on total rounds = intervals completed). This is " +
+      "not an alternating EMOM (movements swap between intervals) or a single-movement " +
+      "EMOM. Find-OR-create, so an identical prescription resolves to the existing " +
+      "library workout; without a `name` a no-match returns needsName instead of " +
+      "creating anything. Use search_movement to get each movementId, then " +
+      "log_multi_emom_workout to record a result.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        everySeconds: { type: "number", description: "Interval length in seconds, e.g. 60 for an EMOM", default: 60 },
+        untilSeconds: { type: "number", description: "Total EMOM length in seconds, e.g. 360 for 6 minutes" },
+        movements: {
+          type: "array",
+          description: "Movements done in every interval, in order",
+          items: {
+            type: "object",
+            properties: {
+              movementName: { type: "string", description: "Movement name exactly as BTWB spells it" },
+              movementId: { type: "number", description: "Numeric movement ID (from search_movement)" },
+              reps: { type: "number", description: "Reps per interval; omit for a movement with no prescribed reps" },
+              weight: { type: "number", description: "Prescribed load, e.g. 135. Omit for bodyweight movements." },
+              weightUnit: { type: "string", enum: ["lbs", "kg"], default: "lbs" },
+              distance: { type: "number", description: "Prescribed distance for carries, runs and rows. Calories are reps on a calorie movement, not a distance." },
+              distanceUnit: { type: "string", enum: ["m", "km", "ft", "yd", "mi", "in"], default: "m" },
+              height: { type: "number", description: "Prescribed height for box jumps and similar" },
+              heightUnit: { type: "string", enum: ["in", "ft", "cm"], default: "in" },
+            },
+            required: ["movementName", "movementId"],
+          },
+        },
+        name: { type: "string", description: "Name to create the workout under, only used when nothing in BTWB's library matches. Without it a no-match returns needsName instead of creating anything" },
+        description: { type: "string", description: "Optional description for a newly created workout; defaults to the name" },
+      },
+      required: ["untilSeconds", "movements"],
+    },
+  },
+  {
+    name: "log_multi_emom_workout",
+    description:
+      "Log a finished 'every interval do all of these movements' EMOM (BTWB type " +
+      "multiple/emom, scored on total rounds) against that specific prescribed " +
+      "workout: `rounds` is how many intervals were completed, from 1 up to " +
+      "ceil(until / every). `loads` overrides a movement's load by position for a " +
+      "scaled result. Optionally linked to a track event. Every entry is always " +
+      "posted with Privacy: Only Me - hardcoded and cannot be overridden.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number" },
+        workoutSlug: { type: "string" },
+        rounds: { type: "number", description: "Intervals completed, e.g. 6 for a full 6-minute EMOM" },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true },
+        loads: {
+          type: "array",
+          description: "Optional per-item load overrides by position; null keeps prescribed",
+          items: {
+            type: ["object", "null"],
+            properties: { weight: { type: "number" }, weightUnit: { type: "string", enum: ["lbs", "kg"] } },
+          },
+        },
+        notes: { type: "string" },
+        trackEventId: { type: "number" },
+      },
+      required: ["workoutId", "workoutSlug", "rounds", "performedDate"],
+    },
+  },
+  {
     name: "log_sets_workout",
     description:
       "Log a set-by-set lifting result (a weightlifting/sets or single/emom workout such as a class " +
@@ -998,6 +1072,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "create_amrap_workout":
         result = await createAmrapWorkout(args);
+        break;
+      case "create_multi_emom_workout":
+        result = await createMultiEmomWorkout(args);
+        break;
+      case "log_multi_emom_workout":
+        result = await logMultiEmomWorkout(args);
         break;
       case "create_for_time_workout":
         result = await createForTimeWorkout(args);
