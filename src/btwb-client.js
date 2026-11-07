@@ -564,10 +564,19 @@ export async function getTrackEvents({ date, track } = {}) {
 //     ascending-ladder AMRAP, e.g. a "2-4-6-8-10..." couplet, scored
 //     "Rounds + Reps" on its own Log Result page) -> logAscendingAmrepsWorkout
 //
+//   multiple-emom -> multiple/emom (every movement in each interval, scored
+//     totalRounds) - wire shape taken from the builder bundle's MultiEMOM
+//     builder and logger -> createMultiEmomWorkout / logMultiEmomWorkout
+//
+//   alternating-emom -> alternating/emom was seen live 11/3/2026 via
+//   get_workout_prescription (every/until/setsCount, scoring "completed", the
+//   contents repeated per set with a pick-load weight input where loaded) but
+//   still has no logger.
+//
 //   In the bundle's taxonomy, wire format unconfirmed, no logger:
-//   alternating-emom, amrapBuyIn, amrapMaxRep, amrapRepeats, amreps (plain,
+//   amrapBuyIn, amrapMaxRep, amrapRepeats, amreps (plain,
 //   non-ascending), deathby-reps, fgb ("Fight Gone Bad"-style), forQuality,
-//   multiple-emom, rftVaryingReps (an RFT whose rep scheme varies by round,
+//   rftVaryingReps (an RFT whose rep scheme varies by round,
 //   e.g. 21-15-9), roundsForMaxReps, tabata, timeEachRound, twentyOne.
 //
 // Scoring values (7, from the same source): completed, totalDistance,
@@ -986,6 +995,78 @@ export async function logAmrapWorkout({
   };
   return postPrescribedSession({
     toolName: "log_amrap_workout",
+    workoutId,
+    workoutSlug,
+    csrfToken,
+    uiobject,
+    performedDate,
+    rxd,
+    notes,
+    trackEventId,
+  });
+}
+
+// Logs a finished "multiple movements every interval" EMOM (prescription type
+// "multiple/emom", scored totalRounds) against a specific prescribed workout,
+// optionally linked to a track event. `rounds` is how many intervals were
+// completed (1 to ceil(until / every)); every prescribed movement is done in
+// each. Mirrors the shape of BTWB's own MultiEMOM logger (new-new-builder
+// bundle): execution carries every/until, `inputs.rounds` and, when scored,
+// `result.totalRounds`; the contents go back as prescribed, with `loads`
+// optionally overriding a movement's load by position for a scaled result.
+export async function logMultiEmomWorkout({
+  workoutId,
+  workoutSlug,
+  rounds,
+  performedDate,
+  rxd = true,
+  loads = [],
+  notes = "",
+  trackEventId,
+}) {
+  const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  const prescription = workout.prescription || {};
+  // Exact match, not a prefix test - alternating/emom and single/emom are
+  // different structures with their own loggers (or none yet).
+  if (prescription.type !== "multiple/emom") {
+    throw new Error(
+      `log_multi_emom_workout only handles multiple/emom workouts; this one is "${prescription.type}".` +
+        (["weightlifting/sets", "single/emom"].includes(prescription.type)
+          ? " Use log_sets_workout for it."
+          : "")
+    );
+  }
+  const everySeconds = prescription.every?.value;
+  const untilSeconds = prescription.until?.value;
+  if (!(everySeconds > 0) || !(untilSeconds > 0)) {
+    throw new Error("This EMOM's prescription has no usable every/until times.");
+  }
+  const maxRounds = Math.ceil(untilSeconds / everySeconds);
+  if (!isPositiveInt(rounds) || rounds > maxRounds) {
+    throw new Error(
+      `rounds must be a whole number from 1 to ${maxRounds} (one per interval); got ${rounds}.`
+    );
+  }
+  const contents = (workout.contents || []).map((item, i) => {
+    const load = loads[i];
+    return load && item.type === "movement"
+      ? { ...item, weight: { value: load.weight, unit: load.weightUnit || "lbs" } }
+      : item;
+  });
+  const uiobject = {
+    type: "workoutSession",
+    execution: {
+      type: prescription.type,
+      every: prescription.every,
+      until: prescription.until,
+      inputs: { rounds },
+      scoring: "totalRounds",
+      result: { totalRounds: rounds },
+    },
+    contents,
+  };
+  return postPrescribedSession({
+    toolName: "log_multi_emom_workout",
     workoutId,
     workoutSlug,
     csrfToken,
@@ -1945,6 +2026,47 @@ export async function createAmrapWorkout({ minutes, movements, name, description
       scoring: "totalRounds",
     },
     contents,
+    name,
+    description,
+  });
+}
+
+// Defines a "multiple movements every interval" EMOM - e.g. "Every 1:00 for
+// 6:00: 10 Bench Press at 135 lb + 3 Strict Pull-ups", where ALL the movements
+// are done inside each interval (as opposed to alternating/emom, which swaps
+// movements between intervals, and single/emom, which is one movement). Shape
+// taken from BTWB's own builder bundle (MultiEMOM in new-new-builder): the wire
+// type is the bundle's "multiple-emom" with the first hyphen turned into "/",
+// scored "totalRounds" with a `rounds` input - the number of intervals the
+// athlete completed, at most ceil(until / every). Movements carry no `inputs`
+// of their own, like the metcon builders. Verified live with a throwaway entry.
+export async function createMultiEmomWorkout({
+  everySeconds = 60,
+  untilSeconds,
+  movements,
+  name,
+  description,
+}) {
+  if (!isPositiveInt(everySeconds)) {
+    throw new Error(`create_multi_emom_workout needs everySeconds as a positive integer (got ${everySeconds}).`);
+  }
+  if (!isPositiveInt(untilSeconds) || untilSeconds <= everySeconds) {
+    throw new Error(
+      `create_multi_emom_workout needs untilSeconds greater than everySeconds (got ${untilSeconds} vs ${everySeconds}).`
+    );
+  }
+  requireMovements("create_multi_emom_workout", movements);
+
+  return saveWorkoutDefinition({
+    toolName: "create_multi_emom_workout",
+    prescription: {
+      type: "multiple/emom",
+      every: { value: everySeconds, unit: "seconds" },
+      until: { value: untilSeconds, unit: "seconds" },
+      inputs: ["rounds"],
+      scoring: "totalRounds",
+    },
+    contents: movements.map((m) => metconMovement(m)),
     name,
     description,
   });
