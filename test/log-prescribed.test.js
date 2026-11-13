@@ -85,6 +85,75 @@ describe("logSetsWorkout", () => {
   });
 });
 
+describe("logAlternatingEmomWorkout", () => {
+  const complex = { type: "complex", reps: { value: 1, unit: "reps" }, weight: { value: 0, unit: "pickload" }, inputs: ["weight"], movements: [] };
+  const jump = { type: "movement", movementName: "Box Jump", movementId: 121, reps: { value: 1, unit: "reps" }, height: { value: 0, unit: "pickheight" }, inputs: ["height"] };
+  const emom = { type: "alternating/emom", every: { value: 60, unit: "seconds" }, until: { value: 240, unit: "seconds" }, setsCount: 1, scoring: "completed" };
+  const items = [complex, jump, complex, jump];
+  const args = { workoutId: 9, workoutSlug: "alt-emom", loads: [105, 105], heights: [24, 24], performedDate: "2026-11-12" };
+
+  it("posts a pick-load per complex and a pick-height per jump, privately, linked to the track event", async () => {
+    const { calls } = installFakeBtwb(withPage(logPage(emom, items)));
+    const client = await freshClient();
+
+    await client.logAlternatingEmomWorkout({ ...args, loads: [95, 105], heights: [20, 24], rxd: false, trackEventId: 346096656, notes: "all easy" });
+
+    const ui = postedUiobject(calls);
+    assert.equal(ui.execution.type, "alternating/emom");
+    assert.equal(ui.execution.scoring, "completed");
+    assert.equal(ui.execution.every.value, 60);
+    assert.deepEqual(ui.contents.map((c) => c.inputs.weight?.value ?? c.inputs.height.value), [95, 20, 105, 24]);
+    assert.deepEqual(ui.contents[0].inputs.weight, { value: 95, unit: "lbs" });
+    assert.deepEqual(ui.contents[1].inputs.height, { value: 20, unit: "in" });
+    assert.equal(ui.contents[1].inputs.weight, undefined);
+    assert.equal(ui.contents[0].inputs.height, undefined);
+    const form = new URLSearchParams(writes(calls)[0].body);
+    assert.equal(form.get("workout_session[privacy]"), "onlyme");
+    assert.equal(form.get("workout_session[rxd]"), "false");
+    assert.equal(form.get("workout_session[notes_plain_text]"), "all easy");
+    assert.deepEqual(form.getAll("track_event_ids[]"), ["346096656"]);
+  });
+
+  it("rejects the wrong number of loads or heights, and non-numeric values, without posting", async () => {
+    // A faked page's body can only be read once, so each rejected call gets its own.
+    const cases = [
+      [{ ...args, loads: [105] }, /needs 2 load\(s\) and 2 height\(s\) but got 1 and 2/],
+      [{ ...args, heights: [24, 24, 24] }, /needs 2 load\(s\) and 2 height\(s\) but got 2 and 3/],
+      [{ ...args, loads: ["105", 105] }, /loads must be an array of numbers/],
+    ];
+    for (const [badArgs, message] of cases) {
+      const { calls } = installFakeBtwb(withPage(logPage(emom, items)));
+      const client = await freshClient();
+      await assert.rejects(client.logAlternatingEmomWorkout(badArgs), message);
+      assert.equal(writes(calls).length, 0);
+    }
+  });
+
+  it("rejects other workout types and points single/emom at log_sets_workout, and vice versa", async () => {
+    installFakeBtwb(withPage(logPage({ type: "single/emom" }, items)));
+    let client = await freshClient();
+    await assert.rejects(client.logAlternatingEmomWorkout(args), /only handles alternating\/emom.*"single\/emom".*Use log_sets_workout/);
+
+    installFakeBtwb(withPage(logPage({ type: "multiple/emom" }, items)));
+    client = await freshClient();
+    await assert.rejects(client.logAlternatingEmomWorkout(args), /only handles alternating\/emom.*"multiple\/emom"/);
+
+    installFakeBtwb(withPage(logPage(emom, items)));
+    client = await freshClient();
+    await assert.rejects(
+      client.logSetsWorkout({ workoutId: 9, workoutSlug: "alt-emom", sets: [{ weight: 105 }], performedDate: "2026-11-12" }),
+      /Use log_alternating_emom_workout/
+    );
+  });
+
+  it("refuses an item that asks for an input other than a load or a height", async () => {
+    const odd = { type: "movement", movementName: "Row", reps: { value: 1, unit: "reps" }, inputs: ["distance"] };
+    installFakeBtwb(withPage(logPage(emom, [complex, odd])));
+    const client = await freshClient();
+    await assert.rejects(client.logAlternatingEmomWorkout({ ...args, loads: [105], heights: [] }), /only handles items that take a load or a height/);
+  });
+});
+
 describe("complex EMOM and rounds-for-time", () => {
   it("logs a totalWeight EMOM of complex items with the summed weight", async () => {
     const items = [1, 2].map(() => ({ type: "complex", reps: { value: 1, unit: "reps" }, movements: [] }));

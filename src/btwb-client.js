@@ -570,8 +570,10 @@ export async function getTrackEvents({ date, track } = {}) {
 //
 //   alternating-emom -> alternating/emom was seen live 11/3/2026 via
 //   get_workout_prescription (every/until/setsCount, scoring "completed", the
-//   contents repeated per set with a pick-load weight input where loaded) but
-//   still has no logger.
+//   contents repeated per set with a pick-load weight input where loaded and a
+//   pick-height input on jumps) -> logAlternatingEmomWorkout (added 11/13/2026
+//   after a snatch-complex-plus-box-jump class piece; verified with a throwaway
+//   entry, see the PR).
 //
 //   In the bundle's taxonomy, wire format unconfirmed, no logger:
 //   amrapBuyIn, amrapMaxRep, amrapRepeats, amreps (plain,
@@ -689,7 +691,8 @@ export async function logSetsWorkout({
   const prescription = workout.prescription || {};
   if (!["weightlifting/sets", "single/emom"].includes(prescription.type)) {
     throw new Error(
-      `log_sets_workout only handles weightlifting/sets and single/emom workouts; this one is "${prescription.type}".`
+      `log_sets_workout only handles weightlifting/sets and single/emom workouts; this one is "${prescription.type}".` +
+        (prescription.type === "alternating/emom" ? " Use log_alternating_emom_workout for this one." : "")
     );
   }
   const prescribedSets = (workout.contents || []).filter(
@@ -738,6 +741,96 @@ export async function logSetsWorkout({
 
   return postPrescribedSession({
     toolName: "log_sets_workout",
+    workoutId,
+    workoutSlug,
+    csrfToken,
+    uiobject,
+    performedDate,
+    rxd,
+    notes,
+    trackEventId,
+  });
+}
+
+// Logs a finished alternating EMOM ("alternating/emom": a different item each
+// interval, e.g. 'Every 2 mins for 12 mins: a snatch complex, then a box jump')
+// against a specific prescribed workout, optionally linked to a track event.
+// Each prescribed item that asks for a pick-load takes the next entry of
+// `loads`; each that asks for a pick-height takes the next entry of `heights`
+// (both in prescription order), so every complex/lift and every box jump gets
+// the number actually used. Scoring stays "completed" as prescribed. The wire
+// shape mirrors logSetsWorkout (execution = the prescription minus its type,
+// contents = the prescribed items with an `inputs` object); height inputs use
+// the same {value, unit} shape as weight - verify with a throwaway entry
+// before trusting it on real data (see the "DO NOT widen" note above).
+export async function logAlternatingEmomWorkout({
+  workoutId,
+  workoutSlug,
+  loads = [],
+  heights = [],
+  weightUnit = "lbs",
+  heightUnit = "in",
+  performedDate,
+  rxd = true,
+  notes = "",
+  trackEventId,
+}) {
+  const { csrfToken, workout } = await loadPrescribedWorkout(workoutId, workoutSlug, performedDate);
+  const prescription = workout.prescription || {};
+  if (prescription.type !== "alternating/emom") {
+    throw new Error(
+      `log_alternating_emom_workout only handles alternating/emom workouts; this one is "${prescription.type}".` +
+        (["weightlifting/sets", "single/emom"].includes(prescription.type)
+          ? " Use log_sets_workout for this one."
+          : "")
+    );
+  }
+  for (const [label, values] of [["loads", loads], ["heights", heights]]) {
+    if (!Array.isArray(values) || values.some((v) => !Number.isFinite(v))) {
+      throw new Error(`${label} must be an array of numbers, one per prescribed item that takes a ${label === "loads" ? "load" : "height"}.`);
+    }
+  }
+
+  const items = (workout.contents || []).filter(
+    (c) => c.type === "movement" || c.type === "complex"
+  );
+  let nextLoad = 0;
+  let nextHeight = 0;
+  const contents = items.map((item) => {
+    const { inputs, ...rest } = item;
+    const needs = Array.isArray(inputs) ? inputs : [];
+    if (needs.length === 0) return rest;
+    if (needs.length === 1 && needs[0] === "weight") {
+      if (nextLoad >= loads.length) return null;
+      return { ...rest, inputs: { weight: { value: loads[nextLoad++], unit: weightUnit } } };
+    }
+    if (needs.length === 1 && needs[0] === "height") {
+      if (nextHeight >= heights.length) return null;
+      return { ...rest, inputs: { height: { value: heights[nextHeight++], unit: heightUnit } } };
+    }
+    throw new Error(
+      `log_alternating_emom_workout only handles items that take a load or a height; this one asks for ${JSON.stringify(needs)}.`
+    );
+  });
+
+  const wantLoads = items.filter((c) => (c.inputs || []).includes("weight")).length;
+  const wantHeights = items.filter((c) => (c.inputs || []).includes("height")).length;
+  if (contents.includes(null) || nextLoad !== loads.length || nextHeight !== heights.length) {
+    throw new Error(
+      `This workout needs ${wantLoads} load(s) and ${wantHeights} height(s) but got ${loads.length} and ${heights.length} - ` +
+        "pass one load per prescribed complex/lift and one height per prescribed jump, in order."
+    );
+  }
+
+  const { type, ...executionFields } = prescription;
+  const uiobject = {
+    type: "workoutSession",
+    execution: { type, ...executionFields, scoring: prescription.scoring || "completed" },
+    contents,
+  };
+
+  return postPrescribedSession({
+    toolName: "log_alternating_emom_workout",
     workoutId,
     workoutSlug,
     csrfToken,
