@@ -13,6 +13,7 @@ import {
   getWeighIns,
   getTrackEvents,
   logSetsWorkout,
+  logAlternatingEmomWorkout,
   logForTimeWorkout,
   logAmrapWorkout,
   logAscendingAmrepsWorkout,
@@ -655,6 +656,43 @@ const TOOLS = [
     },
   },
   {
+    name: "log_alternating_emom_workout",
+    description:
+      "Log a finished alternating EMOM (BTWB type alternating/emom: a different item each " +
+      "interval, e.g. 'Every 2 mins for 12 mins: snatch complex, then box jump') against that " +
+      "specific prescribed workout, optionally linked to a track event. `loads` has one weight " +
+      "per prescribed complex/lift that takes a pick-load, in order; `heights` has one height " +
+      "per prescribed jump that takes a pick-height, in order. Use get_workout_prescription to " +
+      "see how many of each the workout needs, and get_track_events to find " +
+      "workoutId/workoutSlug/trackEventId. The performed date can differ from the track " +
+      "event's date. Every entry is always posted with Privacy: Only Me - hardcoded and " +
+      "cannot be overridden.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workoutId: { type: "number", description: "Numeric workout ID (from get_track_events or the workout URL)" },
+        workoutSlug: { type: "string", description: "Workout URL slug (from get_track_events or the workout URL)" },
+        loads: {
+          type: "array",
+          description: "One load per prescribed pick-load item (complex or lift), in order",
+          items: { type: "number" },
+        },
+        heights: {
+          type: "array",
+          description: "One height per prescribed pick-height item (jump), in order",
+          items: { type: "number" },
+        },
+        weightUnit: { type: "string", enum: ["lbs", "kg"], default: "lbs" },
+        heightUnit: { type: "string", enum: ["in", "ft", "cm"], default: "in" },
+        performedDate: { type: "string", description: "Date performed, format YYYY-MM-DD" },
+        rxd: { type: "boolean", default: true, description: "true = As Prescribed (Rx'd), false = Modified/scaled" },
+        notes: { type: "string", description: "Optional notes for the entry" },
+        trackEventId: { type: "number", description: "Optional track_event ID to link the result to (from get_track_events)" },
+      },
+      required: ["workoutId", "workoutSlug", "performedDate"],
+    },
+  },
+  {
     name: "log_amrap_workout",
     description:
       "Log a finished AMRAP result (completed rounds + extra reps) against that " +
@@ -1081,6 +1119,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "create_for_time_workout":
         result = await createForTimeWorkout(args);
+        break;
+      case "log_alternating_emom_workout":
+        result = await logAlternatingEmomWorkout(args);
         break;
       case "log_sets_workout":
         result = await logSetsWorkout(args);
